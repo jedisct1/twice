@@ -426,15 +426,15 @@ Cmds firewall_rules_cmds(int is_server)
                        "RELATED,ESTABLISHED -j ACCEPT",
                      "iptables -t filter -A FORWARD -i $IF_NAME -o $EXT_IF_NAME -j ACCEPT",
                      NULL },
-  *unset_cmds[] = {
-      "iptables -t nat -D POSTROUTING -o $EXT_IF_NAME -s $REMOTE_TUN_IP -j MASQUERADE",
-      "iptables -t filter -D FORWARD -i $EXT_IF_NAME -o $IF_NAME -m state --state "
-      "RELATED,ESTABLISHED -j ACCEPT",
-      "iptables -t filter -D FORWARD -i $IF_NAME -o $EXT_IF_NAME -j ACCEPT",
-      "iptables -t raw -D PREROUTING ! -i $IF_NAME -d $LOCAL_TUN_IP -m addrtype ! "
-      "--src-type LOCAL -j DROP",
-      NULL
-  };
+   *unset_cmds[] = {
+       "iptables -t nat -D POSTROUTING -o $EXT_IF_NAME -s $REMOTE_TUN_IP -j MASQUERADE",
+       "iptables -t filter -D FORWARD -i $EXT_IF_NAME -o $IF_NAME -m state --state "
+       "RELATED,ESTABLISHED -j ACCEPT",
+       "iptables -t filter -D FORWARD -i $IF_NAME -o $EXT_IF_NAME -j ACCEPT",
+       "iptables -t raw -D PREROUTING ! -i $IF_NAME -d $LOCAL_TUN_IP -m addrtype ! "
+       "--src-type LOCAL -j DROP",
+       NULL
+   };
 #elif defined(__APPLE__) || defined(__OpenBSD__) || defined(__FreeBSD__) || \
     defined(__DragonFly__) || defined(__NetBSD__)
         static const char *set_cmds
@@ -442,7 +442,7 @@ Cmds firewall_rules_cmds(int is_server)
                      "ifconfig $IF_NAME $LOCAL_TUN_IP $REMOTE_TUN_IP up",
                      "ifconfig $IF_NAME inet6 $LOCAL_TUN_IP6 $REMOTE_TUN_IP6 prefixlen 128 up",
                      NULL },
-  *unset_cmds[] = { NULL, NULL };
+   *unset_cmds[] = { NULL, NULL };
 #else
         static const char *const *set_cmds = NULL, *const *unset_cmds = NULL;
 #endif
@@ -461,16 +461,16 @@ Cmds firewall_rules_cmds(int is_server)
                    "route add -inet6 -blackhole 8000::/1 $REMOTE_TUN_IP6",
 #endif
                    NULL },
-  *unset_cmds[] = {
+   *unset_cmds[] = {
 #ifndef NO_DEFAULT_ROUTES
-      "route delete $EXT_IP",
-      "route delete 0/1",
-      "route delete 128/1",
-      "route delete -inet6 0000::/1",
-      "route delete -inet6 8000::/1",
+       "route delete $EXT_IP",
+       "route delete 0/1",
+       "route delete 128/1",
+       "route delete -inet6 0000::/1",
+       "route delete -inet6 8000::/1",
 #endif
-      NULL
-  };
+       NULL
+   };
 #elif defined(__linux__)
         static const char *set_cmds
             [] = { "ip link set dev $IF_NAME up",
@@ -487,17 +487,17 @@ Cmds firewall_rules_cmds(int is_server)
                    "ip -6 rule add table main suppress_prefixlength 0",
 #endif
                    NULL },
-  *unset_cmds[] = {
+   *unset_cmds[] = {
 #ifndef NO_DEFAULT_ROUTES
-      "ip rule delete table 42069",
-      "ip -6 rule delete table 42069",
-      "ip rule delete table main suppress_prefixlength 0",
-      "ip -6 rule delete table main suppress_prefixlength 0",
+       "ip rule delete table 42069",
+       "ip -6 rule delete table 42069",
+       "ip rule delete table main suppress_prefixlength 0",
+       "ip -6 rule delete table main suppress_prefixlength 0",
 #endif
-      "iptables -t raw -D PREROUTING ! -i $IF_NAME -d $LOCAL_TUN_IP -m addrtype ! "
-      "--src-type LOCAL -j DROP",
-      NULL
-  };
+       "iptables -t raw -D PREROUTING ! -i $IF_NAME -d $LOCAL_TUN_IP -m addrtype ! "
+       "--src-type LOCAL -j DROP",
+       NULL
+   };
 #else
         static const char *const *set_cmds = NULL, *const *unset_cmds = NULL;
 #endif

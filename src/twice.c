@@ -7,6 +7,8 @@ int HiAE_encrypt(const uint8_t *key, const uint8_t *nonce, const uint8_t *msg, u
                  size_t msg_len, const uint8_t *ad, size_t ad_len, uint8_t *tag);
 int HiAE_decrypt(const uint8_t *key, const uint8_t *nonce, uint8_t *msg, const uint8_t *ct,
                  size_t ct_len, const uint8_t *ad, size_t ad_len, const uint8_t *tag);
+int HiAE_mac(const uint8_t *key, const uint8_t *nonce, const uint8_t *data, size_t data_len,
+             uint8_t *tag);
 
 static const int POLLFD_TUN = 0, POLLFD_UDP = 1, POLLFD_COUNT = 2;
 
@@ -36,8 +38,8 @@ typedef struct Context_ {
     int                     client_connected;
     uint64_t                packet_random;      // Random value for packet header
     uint64_t                packet_counter;     // Counter for packet header
-    uint8_t                 key[HIAE_KEYBYTES]; // Encryption key
-    int                     key_loaded;         // Whether key has been loaded
+    uint8_t                 key[HIAE_KEYBYTES]; // Encryption key (all-zero if no key file)
+    int                     key_loaded;         // Whether encryption key has been loaded
     ReorderState            reorder;            // Packet reordering state
     struct timespec         last_reorder_check; // Last time we checked for timeouts
     UdpBuf                  udp_buf;
@@ -81,8 +83,13 @@ static int get_random_bytes(void *buf, size_t len)
 // Load encryption key from file
 static int load_key(Context *context)
 {
+    // Initialize with all-zero key for authentication-only mode
+    memset(context->key, 0, HIAE_KEYBYTES);
+
     if (!context->key_file) {
-        return 0; // No key file specified, encryption disabled
+        // No key file specified - use all-zero key for MAC only
+        printf("Running in authentication-only mode (no encryption)\n");
+        return 0;
     }
 
     FILE *fp = fopen(context->key_file, "rb");
@@ -100,6 +107,7 @@ static int load_key(Context *context)
     }
 
     context->key_loaded = 1;
+    printf("Running in encrypted mode with authentication\n");
     return 0;
 }
 
@@ -290,8 +298,10 @@ static int client_connect(Context *context)
         if (discovered_mtu > 0 && discovered_mtu != context->tun_mtu) {
             context->tun_mtu  = discovered_mtu;
             int effective_mtu = get_effective_tun_mtu(context->tun_mtu, context->key_loaded);
-            printf("Setting TUN MTU to discovered value: %d bytes (effective: %d bytes%s)\n",
-                   context->tun_mtu, effective_mtu, context->key_loaded ? ", with encryption" : "");
+            printf(
+                "Setting TUN MTU to discovered value: %d bytes (effective: %d bytes, with "
+                "authentication)\n",
+                context->tun_mtu, effective_mtu);
             if (tun_set_mtu(context->if_name, effective_mtu) != 0) {
                 perror("Failed to set discovered MTU");
             }
@@ -553,20 +563,22 @@ static int reorder_process_packet(Context *context, uint64_t random_value, uint6
     return 0; // Buffered
 }
 
-// Get effective TUN MTU accounting for encryption overhead
+// Get effective TUN MTU accounting for authentication tag overhead
 static int get_effective_tun_mtu(int base_mtu, int key_loaded)
 {
-    // With encryption, we need to leave room for the 16-byte authentication tag
-    return key_loaded ? (base_mtu - HIAE_MACBYTES) : base_mtu;
+    (void) key_loaded; // No longer used - always account for auth tag
+    // Always account for authentication tag (used even without encryption)
+    return base_mtu - HIAE_MACBYTES;
 }
 
 // Check if packet size would cause fragmentation after UDP encapsulation
 static int check_packet_size(size_t packet_len, int tun_mtu, int key_loaded)
 {
+    (void) key_loaded; // No longer used - always account for auth tag
     // UDP encapsulation adds: 2 bytes length + 16 bytes header + UDP header (8) + IP header (20) =
-    // 46 bytes minimum With encryption, add 16 bytes for authentication tag Add some safety margin
+    // 46 bytes minimum. Always add 16 bytes for authentication tag. Add some safety margin
     // for IPv6 or other headers
-    size_t overhead      = 46 + (key_loaded ? HIAE_MACBYTES : 0);
+    size_t overhead      = 46 + HIAE_MACBYTES;
     size_t max_safe_size = tun_mtu + overhead;
 
     if (packet_len > max_safe_size) {
@@ -678,7 +690,7 @@ static int discover_mtu(Context *context)
 
     // Subtract overhead to get TUN MTU
     // Include encryption tag overhead if encryption is enabled
-    int overhead = MTU_OVERHEAD + (context->key_loaded ? HIAE_MACBYTES : 0);
+    int overhead = MTU_OVERHEAD + HIAE_MACBYTES; // Always include auth tag
     int tun_mtu  = best_mtu - overhead;
 
     // Ensure it's at least the minimum
@@ -747,42 +759,38 @@ static int event_loop(Context *context)
             tun_buf.header.random_value = endian_swap64(context->packet_random);
             tun_buf.header.counter      = endian_swap64(context->packet_counter);
 
-            // Encrypt if key is loaded
+            // Process data based on encryption mode
             unsigned char encrypted_data[MAX_PACKET_LEN];
             void         *data_to_send = tun_buf.data;
             size_t        data_len     = (size_t) len;
 
             if (context->key_loaded) {
-                // Use header as nonce for encryption
+                // Full encryption with authentication
                 if (HiAE_encrypt(context->key, (uint8_t *) &tun_buf.header, tun_buf.data,
                                  encrypted_data, len, NULL, 0, tun_buf.tag) != 0) {
                     fprintf(stderr, "Encryption failed\n");
                     return -1;
                 }
                 data_to_send = encrypted_data;
-            }
-
-            // Build iovec based on whether encryption is enabled
-            struct iovec iov[3];
-            int          iov_count;
-
-            if (context->key_loaded) {
-                iov[0] =
-                    (struct iovec) { .iov_base = &tun_buf.header, .iov_len = sizeof(PacketHeader) };
-                iov[1]    = (struct iovec) { .iov_base = data_to_send, .iov_len = data_len };
-                iov[2]    = (struct iovec) { .iov_base = tun_buf.tag, .iov_len = HIAE_MACBYTES };
-                iov_count = 3;
             } else {
-                iov[0] =
-                    (struct iovec) { .iov_base = &tun_buf.header, .iov_len = sizeof(PacketHeader) };
-                iov[1]    = (struct iovec) { .iov_base = data_to_send, .iov_len = data_len };
-                iov_count = 2;
+                // Authentication only (no encryption) with all-zero key
+                if (HiAE_mac(context->key, (uint8_t *) &tun_buf.header, tun_buf.data, len,
+                             tun_buf.tag) != 0) {
+                    fprintf(stderr, "MAC generation failed\n");
+                    return -1;
+                }
             }
+
+            // Always send header, data, and tag
+            struct iovec iov[3] = { { .iov_base = &tun_buf.header,
+                                      .iov_len  = sizeof(PacketHeader) },
+                                    { .iov_base = data_to_send, .iov_len = data_len },
+                                    { .iov_base = tun_buf.tag, .iov_len = HIAE_MACBYTES } };
 
             struct msghdr msg = { .msg_name       = &context->client_addr,
                                   .msg_namelen    = context->client_addr_len,
                                   .msg_iov        = iov,
-                                  .msg_iovlen     = iov_count,
+                                  .msg_iovlen     = 3,
                                   .msg_control    = NULL,
                                   .msg_controllen = 0,
                                   .msg_flags      = 0 };
@@ -806,39 +814,35 @@ static int event_loop(Context *context)
             tun_buf.header.random_value = endian_swap64(context->packet_random);
             tun_buf.header.counter      = endian_swap64(context->packet_counter);
 
-            // Encrypt if key is loaded
+            // Process data based on encryption mode
             unsigned char encrypted_data[MAX_PACKET_LEN];
             void         *data_to_send = tun_buf.data;
             size_t        data_len     = (size_t) len;
 
             if (context->key_loaded) {
-                // Use header as nonce for encryption
+                // Full encryption with authentication
                 if (HiAE_encrypt(context->key, (uint8_t *) &tun_buf.header, tun_buf.data,
                                  encrypted_data, len, NULL, 0, tun_buf.tag) != 0) {
                     fprintf(stderr, "Encryption failed\n");
                     return -1;
                 }
                 data_to_send = encrypted_data;
-            }
-
-            // Build iovec based on whether encryption is enabled
-            struct iovec iov[3];
-            int          iov_count;
-
-            if (context->key_loaded) {
-                iov[0] =
-                    (struct iovec) { .iov_base = &tun_buf.header, .iov_len = sizeof(PacketHeader) };
-                iov[1]    = (struct iovec) { .iov_base = data_to_send, .iov_len = data_len };
-                iov[2]    = (struct iovec) { .iov_base = tun_buf.tag, .iov_len = HIAE_MACBYTES };
-                iov_count = 3;
             } else {
-                iov[0] =
-                    (struct iovec) { .iov_base = &tun_buf.header, .iov_len = sizeof(PacketHeader) };
-                iov[1]    = (struct iovec) { .iov_base = data_to_send, .iov_len = data_len };
-                iov_count = 2;
+                // Authentication only (no encryption) with all-zero key
+                if (HiAE_mac(context->key, (uint8_t *) &tun_buf.header, tun_buf.data, len,
+                             tun_buf.tag) != 0) {
+                    fprintf(stderr, "MAC generation failed\n");
+                    return -1;
+                }
             }
 
-            if (writev(context->udp_fd, iov, iov_count) < 0) {
+            // Always send header, data, and tag
+            struct iovec iov[3] = { { .iov_base = &tun_buf.header,
+                                      .iov_len  = sizeof(PacketHeader) },
+                                    { .iov_base = data_to_send, .iov_len = data_len },
+                                    { .iov_base = tun_buf.tag, .iov_len = HIAE_MACBYTES } };
+
+            if (writev(context->udp_fd, iov, 3) < 0) {
                 if (errno != EAGAIN && errno != EWOULDBLOCK) {
                     perror("Unable to send UDP packet to server");
                     return client_reconnect(context);
@@ -898,22 +902,20 @@ static int event_loop(Context *context)
                 return 0; // Don't process probe packets as normal data
             }
 
-            // Calculate data and tag positions
+            // Calculate data and tag positions (tag is always present)
+            if (recvlen < (ssize_t) (sizeof(PacketHeader) + HIAE_MACBYTES)) {
+                fprintf(stderr, "Packet too small (missing authentication tag)\n");
+                return 0;
+            }
+
             unsigned char *encrypted_data = packet_buf + sizeof(PacketHeader);
-            size_t         data_len;
+            size_t         data_len       = recvlen - sizeof(PacketHeader) - HIAE_MACBYTES;
+            unsigned char *tag            = packet_buf + sizeof(PacketHeader) + data_len;
             unsigned char  decrypted_data[MAX_PACKET_LEN];
             unsigned char *final_data = encrypted_data;
 
             if (context->key_loaded) {
-                // With encryption, last 16 bytes are the tag
-                if (recvlen < (ssize_t) (sizeof(PacketHeader) + HIAE_MACBYTES)) {
-                    fprintf(stderr, "Packet too small for encrypted data\n");
-                    return 0;
-                }
-                data_len           = recvlen - sizeof(PacketHeader) - HIAE_MACBYTES;
-                unsigned char *tag = packet_buf + sizeof(PacketHeader) + data_len;
-
-                // Decrypt and verify
+                // Decrypt and verify with encryption key
                 if (HiAE_decrypt(context->key, (uint8_t *) &header, decrypted_data, encrypted_data,
                                  data_len, NULL, 0, tag) != 0) {
                     fprintf(stderr, "Decryption or authentication failed\n");
@@ -921,8 +923,20 @@ static int event_loop(Context *context)
                 }
                 final_data = decrypted_data;
             } else {
-                // No encryption
-                data_len = recvlen - sizeof(PacketHeader);
+                // Verify MAC only (no decryption) with all-zero key
+                unsigned char expected_tag[HIAE_MACBYTES];
+                if (HiAE_mac(context->key, (uint8_t *) &header, encrypted_data, data_len,
+                             expected_tag) != 0) {
+                    fprintf(stderr, "MAC verification failed\n");
+                    return 0;
+                }
+                // Compare tags
+                if (memcmp(tag, expected_tag, HIAE_MACBYTES) != 0) {
+                    fprintf(stderr, "Authentication tag mismatch - packet rejected\n");
+                    return 0;
+                }
+                // Data is not encrypted, use as-is
+                final_data = encrypted_data;
             }
 
             if (data_len > MAX_PACKET_LEN) {
@@ -953,22 +967,20 @@ static int event_loop(Context *context)
             uint64_t recv_random  = endian_swap64(header.random_value);
             uint64_t recv_counter = endian_swap64(header.counter);
 
-            // Calculate data and tag positions
+            // Calculate data and tag positions (tag is always present)
+            if (recvlen < (ssize_t) (sizeof(PacketHeader) + HIAE_MACBYTES)) {
+                fprintf(stderr, "Packet too small (missing authentication tag)\n");
+                return client_reconnect(context);
+            }
+
             unsigned char *encrypted_data = packet_buf + sizeof(PacketHeader);
-            size_t         data_len;
+            size_t         data_len       = recvlen - sizeof(PacketHeader) - HIAE_MACBYTES;
+            unsigned char *tag            = packet_buf + sizeof(PacketHeader) + data_len;
             unsigned char  decrypted_data[MAX_PACKET_LEN];
             unsigned char *final_data = encrypted_data;
 
             if (context->key_loaded) {
-                // With encryption, last 16 bytes are the tag
-                if (recvlen < (ssize_t) (sizeof(PacketHeader) + HIAE_MACBYTES)) {
-                    fprintf(stderr, "Packet too small for encrypted data\n");
-                    return client_reconnect(context);
-                }
-                data_len           = recvlen - sizeof(PacketHeader) - HIAE_MACBYTES;
-                unsigned char *tag = packet_buf + sizeof(PacketHeader) + data_len;
-
-                // Decrypt and verify
+                // Decrypt and verify with encryption key
                 if (HiAE_decrypt(context->key, (uint8_t *) &header, decrypted_data, encrypted_data,
                                  data_len, NULL, 0, tag) != 0) {
                     fprintf(stderr, "Decryption or authentication failed\n");
@@ -976,8 +988,20 @@ static int event_loop(Context *context)
                 }
                 final_data = decrypted_data;
             } else {
-                // No encryption
-                data_len = recvlen - sizeof(PacketHeader);
+                // Verify MAC only (no decryption) with all-zero key
+                unsigned char expected_tag[HIAE_MACBYTES];
+                if (HiAE_mac(context->key, (uint8_t *) &header, encrypted_data, data_len,
+                             expected_tag) != 0) {
+                    fprintf(stderr, "MAC verification failed\n");
+                    return client_reconnect(context);
+                }
+                // Compare tags
+                if (memcmp(tag, expected_tag, HIAE_MACBYTES) != 0) {
+                    fprintf(stderr, "Authentication tag mismatch - packet rejected\n");
+                    return client_reconnect(context);
+                }
+                // Data is not encrypted, use as-is
+                final_data = encrypted_data;
             }
 
             if (data_len > MAX_PACKET_LEN) {
@@ -1276,8 +1300,8 @@ int main(int argc, char *argv[])
 
     // Adjust MTU for encryption overhead
     int effective_mtu = get_effective_tun_mtu(context->tun_mtu, context->key_loaded);
-    printf("MTU: %d bytes (effective: %d bytes%s)\n", context->tun_mtu, effective_mtu,
-           context->key_loaded ? ", with encryption" : "");
+    printf("MTU: %d bytes (effective: %d bytes, with authentication)\n", context->tun_mtu,
+           effective_mtu);
 
     if (tun_set_mtu(context->if_name, effective_mtu) != 0) {
         perror("mtu");

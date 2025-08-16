@@ -18,6 +18,15 @@ uninstall:
 clean:
 	rm -f twice *~ $(CFLAGS_FILE) $(COMPILE_TEST_FILE)
 
+format:
+	@echo "Formatting C source files..."
+	@clang-format -i src/*.c include/*.h
+	@echo "Done formatting."
+
+format-check:
+	@echo "Checking C source formatting..."
+	@clang-format --dry-run --Werror src/*.c include/*.h && echo "All files are properly formatted." || (echo "Formatting issues found. Run 'make format' to fix." && exit 1)
+
 $(CFLAGS_FILE):
 	@CFLAGS="$(CFLAGS)"
 	@if [ -z "$$CFLAGS" ]; then \
@@ -32,4 +41,4 @@ $(CFLAGS_FILE):
 	fi; \
 	echo "$$CFLAGS" > "$(CFLAGS_FILE)"
 
-.PHONY: all install uninstall clean
+.PHONY: all install uninstall clean format format-check

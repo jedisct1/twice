@@ -56,17 +56,17 @@
 #define DEFAULT_PORT "1194"
 
 // MTU Discovery parameters
-#define MTU_PROBE_MAGIC 0xFFFFFFFFFFFFFFFFULL  // Magic value for MTU probe packets
-#define MTU_MIN 576                            // Minimum MTU (IPv4 minimum)
-#define MTU_MAX 9000                           // Maximum MTU to probe
+#define MTU_PROBE_MAGIC 0xFFFFFFFFFFFFFFFFULL // Magic value for MTU probe packets
+#define MTU_MIN 576                           // Minimum MTU (IPv4 minimum)
+#define MTU_MAX 9000                          // Maximum MTU to probe
 #define MTU_PROBE_TIMEOUT_MS 500              // Timeout for each probe
-#define MTU_PROBE_RETRIES 2                    // Number of retries per size
-#define MTU_OVERHEAD 46                        // UDP + IP + encapsulation overhead
+#define MTU_PROBE_RETRIES 2                   // Number of retries per size
+#define MTU_OVERHEAD 46                       // UDP + IP + encapsulation overhead
 
 // Reordering parameters
-#define REORDER_WINDOW_SIZE 1024        // Large buffer for severe reordering
-#define REORDER_TIMEOUT_MS 2000         // 2 seconds for satellite/poor networks
-#define REORDER_CHECK_INTERVAL_MS 50   // Check every 50ms to reduce overhead
+#define REORDER_WINDOW_SIZE 1024     // Large buffer for severe reordering
+#define REORDER_TIMEOUT_MS 2000      // 2 seconds for satellite/poor networks
+#define REORDER_CHECK_INTERVAL_MS 50 // Check every 50ms to reduce overhead
 
 #if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && \
     __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__ && !defined(NATIVE_BIG_ENDIAN)
@@ -87,45 +87,45 @@ extern volatile sig_atomic_t exit_signal_received;
 
 // 128-bit packet header: 64-bit random value + 64-bit counter
 typedef struct __attribute__((packed)) PacketHeader_ {
-    uint64_t      random_value;             // Random value initialized once at startup
-    uint64_t      counter;                   // Counter incremented for each packet
+    uint64_t random_value; // Random value initialized once at startup
+    uint64_t counter;      // Counter incremented for each packet
 } PacketHeader;
 
 // UDP packet structure with header and tag
 typedef struct __attribute__((aligned(16))) UdpBuf_ {
-    PacketHeader  header;                   // 128-bit header/nonce (16 bytes)
-    unsigned char data[MAX_PACKET_LEN];     // TUN frame data (will be encrypted)
-    unsigned char tag[HIAE_MACBYTES];       // Authentication tag (16 bytes)
-    size_t        pos;                      // Position for partial reads/writes
+    PacketHeader  header;               // 128-bit header/nonce (16 bytes)
+    unsigned char data[MAX_PACKET_LEN]; // TUN frame data (will be encrypted)
+    unsigned char tag[HIAE_MACBYTES];   // Authentication tag (16 bytes)
+    size_t        pos;                  // Position for partial reads/writes
 } UdpBuf;
 
 // Buffered packet for reordering - preallocated
 typedef struct BufferedPacket_ {
-    int           occupied;                 // Whether this slot is in use
-    uint64_t      counter;                  // Packet counter value
-    uint16_t      len;                      // Data length
-    struct timespec timestamp;              // When packet was buffered
-    unsigned char data[MAX_PACKET_LEN];     // Packet data (preallocated)
+    int             occupied;             // Whether this slot is in use
+    uint64_t        counter;              // Packet counter value
+    uint16_t        len;                  // Data length
+    struct timespec timestamp;            // When packet was buffered
+    unsigned char   data[MAX_PACKET_LEN]; // Packet data (preallocated)
 } BufferedPacket;
 
 // Reordering state for a connection
 typedef struct ReorderState_ {
-    uint64_t      expected_counter;         // Next expected packet counter
-    uint64_t      highest_processed;        // Highest counter we've processed
-    uint64_t      random_value;             // Expected random value from peer
-    int           random_initialized;       // Whether we've seen first packet
-    
+    uint64_t expected_counter;   // Next expected packet counter
+    uint64_t highest_processed;  // Highest counter we've processed
+    uint64_t random_value;       // Expected random value from peer
+    int      random_initialized; // Whether we've seen first packet
+
     // Sliding window parameters
-    uint64_t      window_base;              // Lowest acceptable counter
-    
+    uint64_t window_base; // Lowest acceptable counter
+
     // Preallocated packet buffer - indexed by (counter % WINDOW_SIZE)
     BufferedPacket buffer[REORDER_WINDOW_SIZE];
-    
+
     // Statistics
-    uint64_t      packets_received;
-    uint64_t      packets_duplicated;
-    uint64_t      packets_reordered;
-    uint64_t      packets_lost;
+    uint64_t packets_received;
+    uint64_t packets_duplicated;
+    uint64_t packets_reordered;
+    uint64_t packets_lost;
 } ReorderState;
 
 #endif
