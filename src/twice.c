@@ -210,6 +210,44 @@ static int client_reconnect(Context *context)
     return -1;
 }
 
+// Calculate TCP checksum
+static uint16_t tcp_checksum(unsigned char *ip_hdr, unsigned char *tcp_hdr, size_t tcp_len)
+{
+    uint32_t sum = 0;
+    uint16_t *ptr;
+    size_t count;
+    
+    // Add pseudo-header
+    ptr = (uint16_t *)(ip_hdr + 12); // Source IP
+    sum += ntohs(ptr[0]);
+    sum += ntohs(ptr[1]);
+    ptr = (uint16_t *)(ip_hdr + 16); // Dest IP
+    sum += ntohs(ptr[0]);
+    sum += ntohs(ptr[1]);
+    sum += IPPROTO_TCP;
+    sum += tcp_len;
+    
+    // Add TCP header and data
+    ptr = (uint16_t *)tcp_hdr;
+    count = tcp_len;
+    
+    while (count > 1) {
+        sum += ntohs(*ptr++);
+        count -= 2;
+    }
+    
+    if (count > 0) {
+        sum += ((unsigned char *)ptr)[0] << 8;
+    }
+    
+    // Add carry bits
+    while (sum >> 16) {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    
+    return htons(~sum);
+}
+
 // TCP MSS clamping to prevent fragmentation
 static void clamp_tcp_mss(unsigned char *data, size_t len, int tun_mtu)
 {
@@ -217,6 +255,8 @@ static void clamp_tcp_mss(unsigned char *data, size_t len, int tun_mtu)
     int ip_hdr_len, tcp_hdr_len, options_len;
     int i;
     uint16_t max_mss = tun_mtu - 40; // IP header (20) + TCP header (20)
+    uint16_t old_mss, new_checksum;
+    size_t tcp_total_len;
     
     // Check if packet is large enough to contain IP header
     if (len < 20) {
@@ -239,6 +279,7 @@ static void clamp_tcp_mss(unsigned char *data, size_t len, int tun_mtu)
     
     tcp_hdr = data + ip_hdr_len;
     tcp_hdr_len = ((tcp_hdr[12] >> 4) & 0x0f) * 4;
+    tcp_total_len = len - ip_hdr_len;
     
     // Only process SYN packets (check SYN flag in TCP flags byte)
     if (!(tcp_hdr[13] & 0x02)) {
@@ -261,13 +302,19 @@ static void clamp_tcp_mss(unsigned char *data, size_t len, int tun_mtu)
             i++;
         } else if (tcp_options[i] == 2 && i + 3 < options_len) { // MSS option
             if (tcp_options[i + 1] == 4) { // MSS option length is 4
-                uint16_t current_mss = (tcp_options[i + 2] << 8) | tcp_options[i + 3];
-                if (current_mss > max_mss) {
+                old_mss = (tcp_options[i + 2] << 8) | tcp_options[i + 3];
+                if (old_mss > max_mss) {
                     tcp_options[i + 2] = (max_mss >> 8) & 0xff;
                     tcp_options[i + 3] = max_mss & 0xff;
                     
-                    // Note: TCP checksum recalculation is skipped for simplicity
-                    // Most systems will handle this or ignore checksum errors on TUN
+                    // Zero out old checksum
+                    tcp_hdr[16] = 0;
+                    tcp_hdr[17] = 0;
+                    
+                    // Calculate and set new checksum
+                    new_checksum = tcp_checksum(ip_hdr, tcp_hdr, tcp_total_len);
+                    tcp_hdr[16] = (new_checksum >> 8) & 0xff;
+                    tcp_hdr[17] = new_checksum & 0xff;
                 }
             }
             i += tcp_options[i + 1];
