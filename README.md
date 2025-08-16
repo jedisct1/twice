@@ -19,21 +19,22 @@ A lightweight, blazing-fast VPN implementation based on [dsvpn](https://github.c
 
 ## Security
 
-### Without Encryption (Default)
+### Without Encryption Key (Default)
 
-By default, **twice provides NO encryption or authentication.** All traffic is sent in plaintext over UDP. Only use this mode:
-- On trusted internal networks
-- Behind other security measures (like IPsec)
-- For testing or development purposes
-- As a foundation for building more secure solutions
+By default (without a key file), twice provides **authentication but NO encryption**:
+- All packets include a 128-bit authentication tag using HiAE_mac with an all-zero key
+- Rejects unrelated UDP traffic and provides basic packet integrity
+- Traffic is **NOT encrypted** - data is sent in plaintext
+- Only use this mode on trusted internal networks or for testing
 
-### With HiAE Encryption (Optional)
+### With Encryption Key (Using -k option)
 
-When configured with a key file, twice uses [HiAE](https://github.com/hiae-aead/libhiae) (High-Throughput Authenticated Encryption):
+When configured with a key file, twice uses [HiAE](https://github.com/hiae-aead/libhiae) for full authenticated encryption:
 - **AES-based AEAD cipher** with 256-bit keys
 - **128-bit authentication tags** prevent tampering and replay attacks
 - **Unique nonce per packet** ensures security
 - **Hardware acceleration** on modern CPUs (AES-NI, ARM Crypto Extensions)
+- Full confidentiality and authenticity of all traffic
 
 ## Building
 
@@ -163,14 +164,14 @@ sudo ./twice -k vpn.key -d client 10.0.1.100
 
 ### Encryption Notes
 
-- **Overhead:** Encryption adds 16 bytes per packet for the authentication tag
-- **MTU:** When using encryption, the effective TUN MTU is automatically reduced by 16 bytes
+- **Overhead:** All packets include a 16-byte authentication tag
+- **MTU:** The effective TUN MTU is always reduced by 16 bytes to account for the authentication tag
 - **Performance:** HiAE uses hardware AES acceleration when available (AES-NI on x86, ARM Crypto Extensions on ARM)
-- **Compatibility:** Both server and client must use the same key file, or both must run without encryption
+- **Compatibility:** Both server and client must use the same key file, or both must run without a key file
 
 ## Examples
 
-### Basic Setup (No Encryption)
+### Basic Setup (Authentication Only, No Encryption)
 
 **Server:**
 
@@ -240,8 +241,9 @@ sudo ./twice --mtu 1412 client 10.0.1.100
 
 ## Packet Format
 
-### Without Encryption
-UDP packets contain:
+All UDP packets include an authentication tag for packet validation:
+
+### Without Encryption Key (Authentication Only)
 ```
 +--------+--------+--------+--------+
 | Random Value (8 bytes)            |
@@ -251,10 +253,11 @@ UDP packets contain:
 | TUN frame data                    |
 | (variable length, plaintext)      |
 +--------+--------+--------+--------+
+| Authentication Tag (16 bytes)     |
++--------+--------+--------+--------+
 ```
 
-### With Encryption (HiAE)
-UDP packets contain:
+### With Encryption Key (Full Encryption + Authentication)
 ```
 +--------+--------+--------+--------+
 | Random Value (8 bytes)            |
@@ -269,15 +272,13 @@ UDP packets contain:
 ```
 
 The packet header (16 bytes) serves dual purposes:
-
 - **Packet identification**: Random value (64-bit) + Counter (64-bit)
-- **Encryption nonce**: The entire 128-bit header is used as the nonce for HiAE
+- **Nonce for HiAE**: Used for both encryption (when enabled) and authentication
 
-When encryption is enabled:
-
-- **Data is encrypted** using HiAE with the provided 256-bit key
-- **Authentication tag** (16 bytes) is appended to verify integrity and authenticity
-- **Invalid packets** (failed authentication) are silently dropped
+**Authentication is always enforced**:
+- Without key file: HiAE_mac with all-zero key validates packets
+- With key file: Full HiAE encryption + authentication
+- Invalid packets (failed authentication) are silently dropped
 
 Note: No explicit length field is needed since UDP provides the packet length.
 
@@ -303,7 +304,7 @@ When enabled with the `-d` flag, the client:
 sudo ./twice -d client <server-ip>
 ```
 
-The discovery process typically takes 5-10 seconds and happens during initial connection. When encryption is enabled, the discovery automatically accounts for the 16-byte authentication tag overhead.
+The discovery process typically takes 5-10 seconds and happens during initial connection. The discovery automatically accounts for the 16-byte authentication tag overhead (present in all packets).
 
 ## Packet Deduplication and Reordering
 
@@ -356,7 +357,7 @@ sudo ./twice --mtu 1380 client 10.0.1.100
 
 2. **Packet Size Monitoring**: Logs warnings for packets larger than 1500 bytes and drops packets that would definitely cause fragmentation.
 
-3. **Encapsulation Overhead Calculation**: Accounts for UDP (8 bytes) + IP (20+ bytes) + packet header (16 bytes) + optional authentication tag (16 bytes when encryption is enabled).
+3. **Encapsulation Overhead Calculation**: Accounts for UDP (8 bytes) + IP (20+ bytes) + packet header (16 bytes) + authentication tag (16 bytes, always present).
 
 ### MTU Testing and Optimization
 
@@ -424,7 +425,7 @@ To find the optimal MTU for your network path:
 
 - Uses UDP instead of TCP transport
 - Optional HiAE encryption instead of mandatory XChaCha20-Poly1305
-- Simplified packet format when encryption is disabled
+- Always includes authentication tags (HiAE_mac with zero key when no encryption)
 - No key exchange - uses pre-shared keys when encryption is enabled
 - Single client per server (latest client wins)
 - Default port changed to 1194 (OpenVPN standard)
