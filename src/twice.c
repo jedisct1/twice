@@ -592,6 +592,8 @@ static int check_packet_size(size_t packet_len, int tun_mtu, int key_loaded)
 static int send_mtu_probe(Context *context, int probe_size)
 {
     unsigned char probe_data[MAX_PACKET_LEN];
+    unsigned char encrypted_data[MAX_PACKET_LEN];
+    unsigned char auth_tag[HIAE_MACBYTES];
     PacketHeader  probe_header;
 
     // Set magic values to identify as MTU probe
@@ -601,10 +603,33 @@ static int send_mtu_probe(Context *context, int probe_size)
     // Fill probe data with pattern
     memset(probe_data, 0xAA, probe_size);
 
-    struct iovec iov[2] = { { .iov_base = &probe_header, .iov_len = sizeof(PacketHeader) },
-                            { .iov_base = probe_data, .iov_len = probe_size } };
+    // Process data based on encryption mode
+    void  *data_to_send = probe_data;
+    size_t data_len     = probe_size;
 
-    if (writev(context->udp_fd, iov, 2) < 0) {
+    if (context->key_loaded) {
+        // Full encryption with authentication
+        if (HiAE_encrypt(context->key, (uint8_t *) &probe_header, probe_data, encrypted_data,
+                         probe_size, NULL, 0, auth_tag) != 0) {
+            fprintf(stderr, "MTU probe encryption failed\n");
+            return -1;
+        }
+        data_to_send = encrypted_data;
+    } else {
+        // Authentication only (no encryption) with all-zero key
+        if (HiAE_mac(context->key, (uint8_t *) &probe_header, probe_data, probe_size, auth_tag) !=
+            0) {
+            fprintf(stderr, "MTU probe MAC generation failed\n");
+            return -1;
+        }
+    }
+
+    // Always send header, data, and tag (just like normal packets)
+    struct iovec iov[3] = { { .iov_base = &probe_header, .iov_len = sizeof(PacketHeader) },
+                            { .iov_base = data_to_send, .iov_len = data_len },
+                            { .iov_base = auth_tag, .iov_len = HIAE_MACBYTES } };
+
+    if (writev(context->udp_fd, iov, 3) < 0) {
         return -1;
     }
 
@@ -615,7 +640,7 @@ static int send_mtu_probe(Context *context, int probe_size)
 static int recv_mtu_probe(Context *context, int expected_size, int timeout_ms)
 {
     struct pollfd pfd = { .fd = context->udp_fd, .events = POLLIN };
-    unsigned char packet_buf[sizeof(PacketHeader) + MAX_PACKET_LEN];
+    unsigned char packet_buf[sizeof(PacketHeader) + MAX_PACKET_LEN + HIAE_MACBYTES];
 
     int ret = poll(&pfd, 1, timeout_ms);
     if (ret <= 0) {
@@ -623,8 +648,8 @@ static int recv_mtu_probe(Context *context, int expected_size, int timeout_ms)
     }
 
     ssize_t recvlen = recv(context->udp_fd, packet_buf, sizeof(packet_buf), 0);
-    if (recvlen < (ssize_t) sizeof(PacketHeader)) {
-        return 0;
+    if (recvlen < (ssize_t) (sizeof(PacketHeader) + HIAE_MACBYTES)) {
+        return 0; // Too small to be a valid authenticated packet
     }
 
     PacketHeader header;
@@ -633,7 +658,34 @@ static int recv_mtu_probe(Context *context, int expected_size, int timeout_ms)
     // Check if this is an MTU probe response
     if (endian_swap64(header.random_value) == MTU_PROBE_MAGIC &&
         endian_swap64(header.counter) == MTU_PROBE_MAGIC) {
-        size_t data_len = recvlen - sizeof(PacketHeader);
+        // Calculate data length (excluding header and auth tag)
+        size_t data_len = recvlen - sizeof(PacketHeader) - HIAE_MACBYTES;
+
+        // Verify the authentication tag
+        unsigned char *data_ptr = packet_buf + sizeof(PacketHeader);
+        unsigned char *tag_ptr  = packet_buf + sizeof(PacketHeader) + data_len;
+        unsigned char  decrypted_data[MAX_PACKET_LEN];
+
+        if (context->key_loaded) {
+            // Full decryption with authentication verification
+            if (HiAE_decrypt(context->key, (uint8_t *) &header, decrypted_data, data_ptr, data_len,
+                             NULL, 0, tag_ptr) != 0) {
+                return 0; // Authentication failed
+            }
+        } else {
+            // Verify MAC only (no decryption)
+            unsigned char computed_tag[HIAE_MACBYTES];
+            if (HiAE_mac(context->key, (uint8_t *) &header, data_ptr, data_len, computed_tag) !=
+                0) {
+                return 0; // MAC computation failed
+            }
+            // Compare tags
+            if (memcmp(tag_ptr, computed_tag, HIAE_MACBYTES) != 0) {
+                return 0; // Authentication failed
+            }
+        }
+
+        // Check if data length matches expected size
         if (data_len == (size_t) expected_size) {
             return 1; // Success
         }
@@ -678,7 +730,12 @@ static int discover_mtu(Context *context)
         printf("Testing MTU %d... ", test_mtu);
         fflush(stdout);
 
-        if (test_mtu_size(context, test_mtu - MTU_OVERHEAD)) {
+        // Calculate probe data size: test_mtu minus all overheads
+        // MTU_OVERHEAD (46) = UDP(8) + IP(20) + packet header(16) + 2 bytes for length
+        // Also subtract HIAE_MACBYTES (16) since auth tag is always added
+        int probe_data_size = test_mtu - MTU_OVERHEAD - HIAE_MACBYTES;
+
+        if (probe_data_size > 0 && test_mtu_size(context, probe_data_size)) {
             printf("OK\n");
             best_mtu = test_mtu;
             min_mtu  = test_mtu + 1;
@@ -688,10 +745,10 @@ static int discover_mtu(Context *context)
         }
     }
 
-    // Subtract overhead to get TUN MTU
-    // Include encryption tag overhead if encryption is enabled
-    int overhead = MTU_OVERHEAD + HIAE_MACBYTES; // Always include auth tag
-    int tun_mtu  = best_mtu - overhead;
+    // Calculate TUN MTU from best discovered MTU
+    // best_mtu includes: UDP + IP + packet header + auth tag
+    // TUN MTU = best_mtu - MTU_OVERHEAD - HIAE_MACBYTES
+    int tun_mtu = best_mtu - MTU_OVERHEAD - HIAE_MACBYTES;
 
     // Ensure it's at least the minimum
     if (tun_mtu < MTU_MIN) {

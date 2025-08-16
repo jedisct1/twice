@@ -818,7 +818,7 @@ static inline SoftAesBlock softaes_block_load(const uint8_t in[16])
     return out;
 }
 
-static inline SoftAesBlock softaes_block_load64x2(const uint64_t a, const uint64_t b)
+__attribute__((unused)) static inline SoftAesBlock softaes_block_load64x2(const uint64_t a, const uint64_t b)
 {
     const SoftAesBlock out = { (uint32_t) b, (uint32_t) (b >> 32), (uint32_t) a,
                                (uint32_t) (a >> 32) };
@@ -1150,7 +1150,7 @@ static inline SoftAesBlock softaes_block_xaesl(SoftAesBlock block, const SoftAes
     return softaes_block_aesl(block);
 }
 
-static inline SoftAesBlock softaes_block_encrypt(const SoftAesBlock block, const SoftAesBlock rk)
+__attribute__((unused)) static inline SoftAesBlock softaes_block_encrypt(const SoftAesBlock block, const SoftAesBlock rk)
 {
     SoftAesBlock out = softaes_block_aesl(block);
     out.w0 ^= rk.w0;
