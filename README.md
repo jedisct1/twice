@@ -46,7 +46,7 @@ make
 
 ### Server Mode
 
-Start a UDP VPN server listening on all interfaces, port 1194:
+Start a UDP VPN server listening on all interfaces, port 41194:
 
 ```bash
 sudo ./twice server auto
@@ -55,7 +55,7 @@ sudo ./twice server auto
 Or specify a specific interface and port:
 
 ```bash
-sudo ./twice server 0.0.0.0 1194
+sudo ./twice server 0.0.0.0 41194
 ```
 
 ### Client Mode
@@ -69,7 +69,7 @@ sudo ./twice client <server-ip>
 Or specify a custom port:
 
 ```bash
-sudo ./twice client <server-ip> 1194
+sudo ./twice client <server-ip> 41194
 ```
 
 ### Command Line Arguments
@@ -88,7 +88,7 @@ twice [-k <keyfile>] [-m <mtu>] [-d] client <server-ip> [port|auto] [tun-interfa
 **Arguments:**
 - `bind-ip` (server only): IP address to bind to (default: all interfaces)
 - `server-ip` (client only): VPN server IP address
-- `port`: UDP port number (default: 1194)
+- `port`: UDP port number (default: 41194)
 - `tun-interface`: TUN interface name (default: auto-assigned)
 - `local-tun-ip`: Local tunnel IP address (default: 192.168.192.254 for server, 192.168.192.1 for client)
 - `remote-tun-ip`: Remote tunnel IP address (default: 192.168.192.1 for server, 192.168.192.254 for client)
@@ -428,7 +428,7 @@ To find the optimal MTU for your network path:
 - Always includes authentication tags (HiAE_mac with zero key when no encryption)
 - No key exchange - uses pre-shared keys when encryption is enabled
 - Single client per server (latest client wins)
-- Default port changed to 1194 (OpenVPN standard)
+- Default port is 41194 (avoids ISP/WiFi blocking of common VPN ports)
 
 ## Installation
 
@@ -462,8 +462,8 @@ sudo modprobe tun
 
 twice automatically configures firewall rules. If connection fails:
 1. Check if iptables/pf is blocking UDP traffic
-2. Verify the server is listening: `netstat -un | grep 1194`
-3. Test UDP connectivity: `nc -u server-ip 1194`
+2. Verify the server is listening: `netstat -un | grep 41194`
+3. Test UDP connectivity: `nc -u server-ip 41194`
 
 ### Routing Issues
 

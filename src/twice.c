@@ -1072,7 +1072,7 @@ __attribute__((noreturn)) static void usage(void)
          "\t-m, --mtu <mtu>\t\tSet TUN interface MTU (default: 1420)\n"
          "\t-d, --discover-mtu\tAutomatically discover optimal MTU (client only)\n\n"
          "Example:\n\n[server]\n"
-         "\tsudo ./twice server auto\t# listen on UDP port 1194\n"
+         "\tsudo ./twice server auto\t# listen on UDP port 41194\n"
          "\tsudo ./twice -k vpn.key server auto\t# with encryption\n"
          "\tsudo ./twice -m 1380 server auto\t# with custom MTU\n\n[client]\n"
          "\tsudo ./twice client 34.216.127.34\n"

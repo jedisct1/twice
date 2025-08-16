@@ -53,7 +53,7 @@
 #define ACCEPT_TIMEOUT (10 * 1000)
 #define DEFAULT_CLIENT_IP "192.168.192.1"
 #define DEFAULT_SERVER_IP "192.168.192.254"
-#define DEFAULT_PORT "1194"
+#define DEFAULT_PORT "41194"
 
 // MTU Discovery parameters
 #define MTU_PROBE_MAGIC 0xFFFFFFFFFFFFFFFFULL // Magic value for MTU probe packets
