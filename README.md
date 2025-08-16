@@ -1,6 +1,6 @@
-# twice - UDP-based VPN
+# twice - High-Performance VPN
 
-A simple, fast UDP-based VPN software based on [dsvpn](https://github.com/jedisct1/dsvpn). twice provides basic VPN functionality using UDP transport with optional HiAE authenticated encryption - suitable for both secure and insecure networks depending on configuration.
+A lightweight, blazing-fast VPN implementation based on [dsvpn](https://github.com/jedisct1/dsvpn). twice establishes secure network tunnels using UDP for minimal overhead, with optional [HiAE](https://github.com/hiae-aead/libhiae) authenticated encryption for maximum security when needed.
 
 **Performance:** twice is significantly faster than WireGuard, offering superior throughput and lower latency for VPN connections.
 
