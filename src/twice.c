@@ -329,16 +329,10 @@ static void clamp_tcp_mss(unsigned char *data, size_t len, int tun_mtu)
 // Check if packet size would cause fragmentation after UDP encapsulation
 static int check_packet_size(size_t packet_len, int tun_mtu)
 {
-    // UDP encapsulation adds: 2 bytes length + UDP header (8) + IP header (20) = 30 bytes minimum
-    // Add some safety margin for IPv6 or other headers
-    size_t max_safe_size = tun_mtu + 30;
-    
-    if (packet_len > 1500) {
-        fprintf(stderr, "Warning: Large packet (%zu bytes) will likely fragment\n", packet_len);
-        if (packet_len > max_safe_size) {
-            fprintf(stderr, "Dropping oversized packet (%zu bytes)\n", packet_len);
-            return -1; // Drop packet
-        }
+    // Packet must not exceed TUN MTU
+    if (packet_len > (size_t)tun_mtu) {
+        fprintf(stderr, "Warning: Packet size %zu exceeds TUN MTU %d\n", packet_len, tun_mtu);
+        return -1; // Drop packet
     }
     return 0; // Packet size OK
 }
