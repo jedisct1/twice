@@ -13,37 +13,36 @@ int HiAE_mac(const uint8_t *key, const uint8_t *nonce, const uint8_t *data, size
 static const int POLLFD_TUN = 0, POLLFD_UDP = 1, POLLFD_COUNT = 2;
 
 typedef struct Context_ {
-    const char             *wanted_if_name;
-    const char             *local_tun_ip;
-    const char             *remote_tun_ip;
-    const char             *local_tun_ip6;
-    const char             *remote_tun_ip6;
-    const char             *server_ip_or_name;
-    const char             *server_port;
-    const char             *ext_if_name;
-    const char             *wanted_ext_gw_ip;
-    const char             *key_file; // Path to key file
-    char                    client_ip[NI_MAXHOST];
-    char                    ext_gw_ip[64];
-    char                    server_ip[64];
-    char                    if_name[IFNAMSIZ];
-    int                     is_server;
-    int                     tun_fd;
-    int                     udp_fd;
-    int                     firewall_rules_set;
-    int                     tun_mtu;
-    int                     mtu_discovery; // Enable MTU discovery
-    struct sockaddr_storage client_addr;
-    socklen_t               client_addr_len;
-    int                     client_connected;
-    uint64_t                packet_random;      // Random value for packet header
-    uint64_t                packet_counter;     // Counter for packet header
-    uint8_t                 key[HIAE_KEYBYTES]; // Encryption key (all-zero if no key file)
-    int                     key_loaded;         // Whether encryption key has been loaded
-    ReorderState            reorder;            // Packet reordering state
-    struct timespec         last_reorder_check; // Last time we checked for timeouts
-    UdpBuf                  udp_buf;
-    struct pollfd           fds[2];
+    const char     *wanted_if_name;
+    const char     *local_tun_ip;
+    const char     *remote_tun_ip;
+    const char     *local_tun_ip6;
+    const char     *remote_tun_ip6;
+    const char     *server_ip_or_name;
+    const char     *server_port;
+    const char     *ext_if_name;
+    const char     *wanted_ext_gw_ip;
+    const char     *key_file; // Path to key file
+    char            ext_gw_ip[64];
+    char            server_ip[64];
+    char            if_name[IFNAMSIZ];
+    int             is_server;
+    int             tun_fd;
+    int             udp_fd;
+    int             firewall_rules_set;
+    int             tun_mtu;
+    int             mtu_discovery;      // Enable MTU discovery
+    Peer            peers[MAX_PEERS];   // Array of connected peers
+    int             peer_count;         // Number of active peers
+    struct timespec last_peer_cleanup;  // Last time we cleaned up inactive peers
+    uint64_t        packet_random;      // Random value for packet header
+    uint64_t        packet_counter;     // Counter for packet header
+    uint8_t         key[HIAE_KEYBYTES]; // Encryption key (all-zero if no key file)
+    int             key_loaded;         // Whether encryption key has been loaded
+    ReorderState    reorder;            // Packet reordering state
+    struct timespec last_reorder_check; // Last time we checked for timeouts
+    UdpBuf          udp_buf;
+    struct pollfd   fds[2];
 } Context;
 
 volatile sig_atomic_t exit_signal_received;
@@ -57,6 +56,12 @@ static int  reorder_process_packet(Context *context, uint64_t random_value, uint
                                    const unsigned char *data, size_t len);
 static int  discover_mtu(Context *context);
 static int  get_effective_tun_mtu(int base_mtu, int key_loaded);
+
+// Peer management functions
+static int  peer_find_or_add(Context *context, struct sockaddr_storage *addr, socklen_t addr_len);
+static void peer_cleanup_inactive(Context *context);
+static int  sockaddr_equal(const struct sockaddr_storage *a1, socklen_t len1,
+                           const struct sockaddr_storage *a2, socklen_t len2);
 
 // Read secure random bytes from /dev/urandom
 static int get_random_bytes(void *buf, size_t len)
@@ -260,9 +265,8 @@ static int udp_client_socket(const char *address, const char *port)
 
 static void client_disconnect(Context *context)
 {
-    context->client_connected = 0;
-    memset(&context->client_addr, 0, sizeof context->client_addr);
-    context->client_addr_len = 0;
+    // Client doesn't track peers
+    (void) context;
 }
 
 static int client_connect(Context *context)
@@ -711,6 +715,99 @@ static int test_mtu_size(Context *context, int test_size)
 }
 
 // Perform MTU discovery using binary search
+// Compare two sockaddr structures
+static int sockaddr_equal(const struct sockaddr_storage *a1, socklen_t len1,
+                          const struct sockaddr_storage *a2, socklen_t len2)
+{
+    if (len1 != len2) {
+        return 0;
+    }
+
+    if (a1->ss_family != a2->ss_family) {
+        return 0;
+    }
+
+    if (a1->ss_family == AF_INET) {
+        struct sockaddr_in *sin1 = (struct sockaddr_in *) a1;
+        struct sockaddr_in *sin2 = (struct sockaddr_in *) a2;
+        return sin1->sin_port == sin2->sin_port && sin1->sin_addr.s_addr == sin2->sin_addr.s_addr;
+    } else if (a1->ss_family == AF_INET6) {
+        struct sockaddr_in6 *sin1 = (struct sockaddr_in6 *) a1;
+        struct sockaddr_in6 *sin2 = (struct sockaddr_in6 *) a2;
+        return sin1->sin6_port == sin2->sin6_port &&
+               memcmp(&sin1->sin6_addr, &sin2->sin6_addr, sizeof(struct in6_addr)) == 0;
+    }
+
+    return 0;
+}
+
+// Find a peer or add it if not found. Returns peer index or -1 on error
+static int peer_find_or_add(Context *context, struct sockaddr_storage *addr, socklen_t addr_len)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+
+    // First, look for existing peer
+    for (int i = 0; i < context->peer_count; i++) {
+        if (sockaddr_equal(&context->peers[i].addr, context->peers[i].addr_len, addr, addr_len)) {
+            // Update last seen time
+            context->peers[i].last_seen = now;
+            return i;
+        }
+    }
+
+    // Not found, add new peer if there's room
+    if (context->peer_count >= MAX_PEERS) {
+        // Try to clean up inactive peers first
+        peer_cleanup_inactive(context);
+
+        if (context->peer_count >= MAX_PEERS) {
+            fprintf(stderr, "Maximum number of peers (%d) reached\n", MAX_PEERS);
+            return -1;
+        }
+    }
+
+    // Add new peer
+    int idx = context->peer_count++;
+    memcpy(&context->peers[idx].addr, addr, addr_len);
+    context->peers[idx].addr_len  = addr_len;
+    context->peers[idx].last_seen = now;
+
+    // Get string representation of IP
+    getnameinfo((const struct sockaddr *) addr, addr_len, context->peers[idx].ip_str,
+                sizeof(context->peers[idx].ip_str), NULL, 0, NI_NUMERICHOST | NI_NUMERICSERV);
+
+    printf("New peer connected from [%s]\n", context->peers[idx].ip_str);
+
+    return idx;
+}
+
+// Remove inactive peers
+static void peer_cleanup_inactive(Context *context)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+
+    int new_count = 0;
+    for (int i = 0; i < context->peer_count; i++) {
+        // Calculate time since last seen (in milliseconds)
+        long elapsed_ms = (now.tv_sec - context->peers[i].last_seen.tv_sec) * 1000 +
+                          (now.tv_nsec - context->peers[i].last_seen.tv_nsec) / 1000000;
+
+        if (elapsed_ms < PEER_TIMEOUT_MS) {
+            // Keep this peer (copy if needed)
+            if (new_count != i) {
+                memcpy(&context->peers[new_count], &context->peers[i], sizeof(Peer));
+            }
+            new_count++;
+        } else {
+            printf("Peer [%s] timed out after %ld ms\n", context->peers[i].ip_str, elapsed_ms);
+        }
+    }
+
+    context->peer_count = new_count;
+}
+
 static int discover_mtu(Context *context)
 {
     if (context->is_server) {
@@ -779,6 +876,17 @@ static int event_loop(Context *context)
     if (ms_since_check >= REORDER_CHECK_INTERVAL_MS) {
         reorder_check_timeouts(context);
         context->last_reorder_check = now;
+
+        // Also check for inactive peers periodically (every 5 seconds)
+        if (context->is_server) {
+            uint64_t ms_since_peer_cleanup =
+                (now.tv_sec - context->last_peer_cleanup.tv_sec) * 1000 +
+                (now.tv_nsec - context->last_peer_cleanup.tv_nsec) / 1000000;
+            if (ms_since_peer_cleanup >= 5000) { // Clean up every 5 seconds
+                peer_cleanup_inactive(context);
+                context->last_peer_cleanup = now;
+            }
+        }
     }
 
     if ((found_fds = poll(fds, POLLFD_COUNT, REORDER_CHECK_INTERVAL_MS)) == -1) {
@@ -803,7 +911,7 @@ static int event_loop(Context *context)
         }
 
         // Send TUN data over UDP with 128-bit header
-        if (context->is_server && context->client_connected) {
+        if (context->is_server && context->peer_count > 0) {
             // Check for counter wrap and increment random value
             if (context->packet_counter == UINT64_MAX) {
                 context->packet_random++;
@@ -844,18 +952,21 @@ static int event_loop(Context *context)
                                     { .iov_base = data_to_send, .iov_len = data_len },
                                     { .iov_base = tun_buf.tag, .iov_len = HIAE_MACBYTES } };
 
-            struct msghdr msg = { .msg_name       = &context->client_addr,
-                                  .msg_namelen    = context->client_addr_len,
-                                  .msg_iov        = iov,
-                                  .msg_iovlen     = 3,
-                                  .msg_control    = NULL,
-                                  .msg_controllen = 0,
-                                  .msg_flags      = 0 };
+            // Broadcast to all connected peers
+            for (int i = 0; i < context->peer_count; i++) {
+                struct msghdr msg = { .msg_name       = &context->peers[i].addr,
+                                      .msg_namelen    = context->peers[i].addr_len,
+                                      .msg_iov        = iov,
+                                      .msg_iovlen     = 3,
+                                      .msg_control    = NULL,
+                                      .msg_controllen = 0,
+                                      .msg_flags      = 0 };
 
-            if (sendmsg(context->udp_fd, &msg, 0) < 0) {
-                if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                    perror("Unable to send UDP packet to client");
-                    return client_reconnect(context);
+                if (sendmsg(context->udp_fd, &msg, 0) < 0) {
+                    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                        fprintf(stderr, "Unable to send UDP packet to peer %s: %s\n",
+                                context->peers[i].ip_str, strerror(errno));
+                    }
                 }
             }
         } else if (!context->is_server && context->udp_fd != -1) {
@@ -915,7 +1026,7 @@ static int event_loop(Context *context)
     }
     if (fds[POLLFD_UDP].revents & POLLIN) {
         if (context->is_server) {
-            // Server: receive from any client and track the latest one
+            // Server: receive from any peer
             struct sockaddr_storage from_addr;
             socklen_t               from_addr_len = sizeof(from_addr);
             unsigned char packet_buf[sizeof(PacketHeader) + MAX_PACKET_LEN + HIAE_MACBYTES];
@@ -929,16 +1040,10 @@ static int event_loop(Context *context)
                 return 0;
             }
 
-            // Update client address
-            memcpy(&context->client_addr, &from_addr, from_addr_len);
-            context->client_addr_len = from_addr_len;
-            if (!context->client_connected) {
-                char client_ip[NI_MAXHOST];
-                getnameinfo((const struct sockaddr *) &from_addr, from_addr_len, client_ip,
-                            sizeof client_ip, NULL, 0, NI_NUMERICHOST | NI_NUMERICSERV);
-                printf("Client connected from [%s]\n", client_ip);
-                strcpy(context->client_ip, client_ip);
-                context->client_connected = 1;
+            // Track or update the peer
+            if (peer_find_or_add(context, &from_addr, from_addr_len) < 0) {
+                fprintf(stderr, "Failed to track peer\n");
+                return 0;
             }
 
             // Extract header
@@ -1075,8 +1180,8 @@ static int event_loop(Context *context)
 
 static int doit(Context *context)
 {
-    context->udp_fd           = -1;
-    context->client_connected = 0;
+    context->udp_fd     = -1;
+    context->peer_count = 0;
     memset(context->fds, 0, sizeof context->fds);
     context->fds[POLLFD_TUN] =
         (struct pollfd) { .fd = context->tun_fd, .events = POLLIN, .revents = 0 };
@@ -1084,6 +1189,7 @@ static int doit(Context *context)
     // Initialize reorder state
     reorder_init(&context->reorder);
     clock_gettime(CLOCK_MONOTONIC, &context->last_reorder_check);
+    clock_gettime(CLOCK_MONOTONIC, &context->last_peer_cleanup);
 
     if (context->is_server) {
         if ((context->udp_fd =

@@ -68,6 +68,10 @@
 #define REORDER_TIMEOUT_MS 2000      // 2 seconds for satellite/poor networks
 #define REORDER_CHECK_INTERVAL_MS 50 // Check every 50ms to reduce overhead
 
+// Multi-peer support
+#define MAX_PEERS 32          // Maximum number of simultaneous peers
+#define PEER_TIMEOUT_MS 30000 // 30 seconds of inactivity before peer removal
+
 #if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && \
     __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__ && !defined(NATIVE_BIG_ENDIAN)
 #define NATIVE_BIG_ENDIAN
@@ -107,6 +111,14 @@ typedef struct BufferedPacket_ {
     struct timespec timestamp;            // When packet was buffered
     unsigned char   data[MAX_PACKET_LEN]; // Packet data (preallocated)
 } BufferedPacket;
+
+// Peer tracking structure - only stores address information
+typedef struct Peer_ {
+    struct sockaddr_storage addr;               // Peer address
+    socklen_t               addr_len;           // Address length
+    struct timespec         last_seen;          // Last activity timestamp
+    char                    ip_str[NI_MAXHOST]; // String representation of IP
+} Peer;
 
 // Reordering state for a connection
 typedef struct ReorderState_ {
