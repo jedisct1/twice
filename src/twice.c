@@ -18,7 +18,7 @@ typedef struct Context_ {
     const char     *remote_tun_ip;
     const char     *local_tun_ip6;
     const char     *remote_tun_ip6;
-    const char     *server_ip_or_name;
+    const char     *server_ip_or_name; // For server mode or single server client
     const char     *server_port;
     const char     *ext_if_name;
     const char     *wanted_ext_gw_ip;
@@ -31,16 +31,18 @@ typedef struct Context_ {
     int             udp_fd;
     int             firewall_rules_set;
     int             tun_mtu;
-    int             mtu_discovery;      // Enable MTU discovery
-    Peer            peers[MAX_PEERS];   // Array of connected peers
-    int             peer_count;         // Number of active peers
-    struct timespec last_peer_cleanup;  // Last time we cleaned up inactive peers
-    uint64_t        packet_random;      // Random value for packet header
-    uint64_t        packet_counter;     // Counter for packet header
-    uint8_t         key[HIAE_KEYBYTES]; // Encryption key (all-zero if no key file)
-    int             key_loaded;         // Whether encryption key has been loaded
-    ReorderState    reorder;            // Packet reordering state
-    struct timespec last_reorder_check; // Last time we checked for timeouts
+    int             mtu_discovery;        // Enable MTU discovery
+    Peer            peers[MAX_PEERS];     // Array of connected peers (server mode)
+    int             peer_count;           // Number of active peers (server mode)
+    struct timespec last_peer_cleanup;    // Last time we cleaned up inactive peers
+    ServerEndpoint  servers[MAX_SERVERS]; // Array of server endpoints (client mode)
+    int             server_count;         // Number of configured servers (client mode)
+    uint64_t        packet_random;        // Random value for packet header
+    uint64_t        packet_counter;       // Counter for packet header
+    uint8_t         key[HIAE_KEYBYTES];   // Encryption key (all-zero if no key file)
+    int             key_loaded;           // Whether encryption key has been loaded
+    ReorderState    reorder;              // Packet reordering state
+    struct timespec last_reorder_check;   // Last time we checked for timeouts
     UdpBuf          udp_buf;
     struct pollfd   fds[2];
 } Context;
@@ -62,6 +64,11 @@ static int  peer_find_or_add(Context *context, struct sockaddr_storage *addr, so
 static void peer_cleanup_inactive(Context *context);
 static int  sockaddr_equal(const struct sockaddr_storage *a1, socklen_t len1,
                            const struct sockaddr_storage *a2, socklen_t len2);
+
+// Multi-server client functions
+static int parse_server_list(Context *context, const char *server_list);
+static int resolve_server_endpoints(Context *context);
+static int is_server_address(Context *context, struct sockaddr_storage *addr, socklen_t addr_len);
 
 // Read secure random bytes from /dev/urandom
 static int get_random_bytes(void *buf, size_t len)
@@ -230,27 +237,44 @@ static int udp_client_socket(const char *address, const char *port)
     int             client_fd;
     int             err;
 
-    printf("Connecting to UDP %s:%s...\n", address, port);
-    memset(&hints, 0, sizeof hints);
-    hints.ai_flags    = 0;
-    hints.ai_family   = AF_UNSPEC;
-    hints.ai_socktype = SOCK_DGRAM;
-    hints.ai_addr     = NULL;
-    if ((eai = getaddrinfo(address, port, &hints, &res)) != 0 ||
-        (res->ai_family != AF_INET && res->ai_family != AF_INET6)) {
-        fprintf(stderr, "Unable to create the UDP client socket: [%s]\n", gai_strerror(eai));
-        errno = EINVAL;
-        return -1;
-    }
-    if ((client_fd = socket(res->ai_family, SOCK_DGRAM, IPPROTO_UDP)) == -1 ||
-        connect(client_fd, (const struct sockaddr *) res->ai_addr, res->ai_addrlen) != 0) {
-        freeaddrinfo(res);
-        err = errno;
-        if (client_fd != -1) {
-            (void) close(client_fd);
+    // For backward compatibility with single server
+    if (address != NULL) {
+        printf("Connecting to UDP %s:%s...\n", address, port);
+        memset(&hints, 0, sizeof hints);
+        hints.ai_flags    = 0;
+        hints.ai_family   = AF_UNSPEC;
+        hints.ai_socktype = SOCK_DGRAM;
+        hints.ai_addr     = NULL;
+        if ((eai = getaddrinfo(address, port, &hints, &res)) != 0 ||
+            (res->ai_family != AF_INET && res->ai_family != AF_INET6)) {
+            fprintf(stderr, "Unable to create the UDP client socket: [%s]\n", gai_strerror(eai));
+            errno = EINVAL;
+            return -1;
         }
-        errno = err;
-        return -1;
+        if ((client_fd = socket(res->ai_family, SOCK_DGRAM, IPPROTO_UDP)) == -1 ||
+            connect(client_fd, (const struct sockaddr *) res->ai_addr, res->ai_addrlen) != 0) {
+            freeaddrinfo(res);
+            err = errno;
+            if (client_fd != -1) {
+                (void) close(client_fd);
+            }
+            errno = err;
+            return -1;
+        }
+        freeaddrinfo(res);
+    } else {
+        // Create unconnected socket for multi-server mode
+        if ((client_fd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP)) == -1) {
+            // Try IPv4 if IPv6 fails
+            if ((client_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1) {
+                return -1;
+            }
+        }
+        // Enable dual stack if using IPv6
+#if defined(IPPROTO_IPV6) && defined(IPV6_V6ONLY)
+        int v6only = 0;
+        setsockopt(client_fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
+#endif
     }
 
     // Set larger socket buffers to handle burst traffic
@@ -259,7 +283,6 @@ static int udp_client_socket(const char *address, const char *port)
     setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
     setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
 
-    freeaddrinfo(res);
     return client_fd;
 }
 
@@ -284,11 +307,33 @@ static int client_connect(Context *context)
         firewall_rules(context, 1, 0);
     }
 #endif
-    context->udp_fd = udp_client_socket(context->server_ip, context->server_port);
-    if (context->udp_fd == -1) {
-        perror("UDP client connection failed");
-        return -1;
+
+    // Handle multi-server vs single server mode
+    if (context->server_count > 0) {
+        // Multi-server mode - create unconnected socket
+        context->udp_fd = udp_client_socket(NULL, context->server_port);
+        if (context->udp_fd == -1) {
+            perror("UDP client socket creation failed");
+            return -1;
+        }
+
+        // Resolve all server endpoints
+        if (resolve_server_endpoints(context) != 0) {
+            fprintf(stderr, "Failed to resolve server endpoints\n");
+            close(context->udp_fd);
+            return -1;
+        }
+
+        printf("Connected to %d server endpoint(s)\n", context->server_count);
+    } else {
+        // Single server mode (backward compatibility)
+        context->udp_fd = udp_client_socket(context->server_ip, context->server_port);
+        if (context->udp_fd == -1) {
+            perror("UDP client connection failed");
+            return -1;
+        }
     }
+
     fcntl(context->udp_fd, F_SETFL, fcntl(context->udp_fd, F_GETFL, 0) | O_NONBLOCK);
 
     firewall_rules(context, 1, 0);
@@ -808,6 +853,105 @@ static void peer_cleanup_inactive(Context *context)
     context->peer_count = new_count;
 }
 
+// Parse comma-separated server list
+static int parse_server_list(Context *context, const char *server_list)
+{
+    if (!server_list || context->is_server) {
+        return 0;
+    }
+
+    // Make a copy to tokenize
+    char *list_copy = strdup(server_list);
+    if (!list_copy) {
+        return -1;
+    }
+
+    context->server_count = 0;
+    char *token           = strtok(list_copy, ",");
+
+    while (token != NULL && context->server_count < MAX_SERVERS) {
+        // Trim whitespace
+        while (*token == ' ')
+            token++;
+        char *end = token + strlen(token) - 1;
+        while (end > token && *end == ' ')
+            *end-- = '\0';
+
+        // Store hostname
+        snprintf(context->servers[context->server_count].hostname,
+                 sizeof(context->servers[context->server_count].hostname), "%s", token);
+        context->servers[context->server_count].active = 1;
+        context->server_count++;
+
+        token = strtok(NULL, ",");
+    }
+
+    free(list_copy);
+
+    if (context->server_count == 0) {
+        fprintf(stderr, "No valid servers in list\n");
+        return -1;
+    }
+
+    printf("Configured %d server endpoint(s)\n", context->server_count);
+    return 0;
+}
+
+// Resolve all server hostnames to addresses
+static int resolve_server_endpoints(Context *context)
+{
+    if (context->is_server) {
+        return 0;
+    }
+
+    for (int i = 0; i < context->server_count; i++) {
+        struct addrinfo hints, *res;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family   = AF_UNSPEC;
+        hints.ai_socktype = SOCK_DGRAM;
+
+        int ret = getaddrinfo(context->servers[i].hostname, context->server_port, &hints, &res);
+        if (ret != 0) {
+            fprintf(stderr, "Failed to resolve %s: %s\n", context->servers[i].hostname,
+                    gai_strerror(ret));
+            context->servers[i].active = 0;
+            continue;
+        }
+
+        // Store resolved address
+        memcpy(&context->servers[i].addr, res->ai_addr, res->ai_addrlen);
+        context->servers[i].addr_len = res->ai_addrlen;
+
+        // Get string representation
+        getnameinfo(res->ai_addr, res->ai_addrlen, context->servers[i].ip_str,
+                    sizeof(context->servers[i].ip_str), NULL, 0, NI_NUMERICHOST | NI_NUMERICSERV);
+
+        printf("Resolved %s to %s\n", context->servers[i].hostname, context->servers[i].ip_str);
+
+        freeaddrinfo(res);
+    }
+
+    return 0;
+}
+
+// Check if an address is one of our configured servers
+static int is_server_address(Context *context, struct sockaddr_storage *addr, socklen_t addr_len)
+{
+    if (context->is_server) {
+        return 0;
+    }
+
+    for (int i = 0; i < context->server_count; i++) {
+        if (context->servers[i].active &&
+            sockaddr_equal(&context->servers[i].addr, context->servers[i].addr_len, addr,
+                           addr_len)) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 static int discover_mtu(Context *context)
 {
     if (context->is_server) {
@@ -1010,10 +1154,34 @@ static int event_loop(Context *context)
                                     { .iov_base = data_to_send, .iov_len = data_len },
                                     { .iov_base = tun_buf.tag, .iov_len = HIAE_MACBYTES } };
 
-            if (writev(context->udp_fd, iov, 3) < 0) {
-                if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                    perror("Unable to send UDP packet to server");
-                    return client_reconnect(context);
+            if (context->server_count > 0) {
+                // Multi-server mode - broadcast to all servers
+                for (int i = 0; i < context->server_count; i++) {
+                    if (!context->servers[i].active)
+                        continue;
+
+                    struct msghdr msg = { .msg_name       = &context->servers[i].addr,
+                                          .msg_namelen    = context->servers[i].addr_len,
+                                          .msg_iov        = iov,
+                                          .msg_iovlen     = 3,
+                                          .msg_control    = NULL,
+                                          .msg_controllen = 0,
+                                          .msg_flags      = 0 };
+
+                    if (sendmsg(context->udp_fd, &msg, 0) < 0) {
+                        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                            fprintf(stderr, "Unable to send UDP packet to server %s: %s\n",
+                                    context->servers[i].hostname, strerror(errno));
+                        }
+                    }
+                }
+            } else {
+                // Single server mode - use connected socket
+                if (writev(context->udp_fd, iov, 3) < 0) {
+                    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                        perror("Unable to send UDP packet to server");
+                        return client_reconnect(context);
+                    }
                 }
             }
         }
@@ -1109,16 +1277,40 @@ static int event_loop(Context *context)
             // Process packet through reordering system
             reorder_process_packet(context, recv_random, recv_counter, final_data, data_len);
         } else {
-            // Client: receive from server
+            // Client: receive from server(s)
             unsigned char packet_buf[sizeof(PacketHeader) + MAX_PACKET_LEN + HIAE_MACBYTES];
+            ssize_t       recvlen;
 
-            ssize_t recvlen = recv(context->udp_fd, packet_buf, sizeof(packet_buf), 0);
-            if (recvlen < (ssize_t) sizeof(PacketHeader)) {
-                if (recvlen < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-                    perror("UDP recv failed");
-                    return client_reconnect(context);
+            if (context->server_count > 0) {
+                // Multi-server mode - receive from any server
+                struct sockaddr_storage from_addr;
+                socklen_t               from_addr_len = sizeof(from_addr);
+
+                recvlen = recvfrom(context->udp_fd, packet_buf, sizeof(packet_buf), 0,
+                                   (struct sockaddr *) &from_addr, &from_addr_len);
+                if (recvlen < (ssize_t) sizeof(PacketHeader)) {
+                    if (recvlen < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                        perror("UDP recvfrom failed");
+                        return client_reconnect(context);
+                    }
+                    return 0;
                 }
-                return 0;
+
+                // Verify packet is from one of our configured servers
+                if (!is_server_address(context, &from_addr, from_addr_len)) {
+                    fprintf(stderr, "Received packet from unknown server, ignoring\n");
+                    return 0;
+                }
+            } else {
+                // Single server mode - use connected socket
+                recvlen = recv(context->udp_fd, packet_buf, sizeof(packet_buf), 0);
+                if (recvlen < (ssize_t) sizeof(PacketHeader)) {
+                    if (recvlen < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                        perror("UDP recv failed");
+                        return client_reconnect(context);
+                    }
+                    return 0;
+                }
             }
 
             // Extract header
@@ -1404,6 +1596,21 @@ int main(int argc, char *argv[])
                                      : argv[arg_start + 1];
     if (context->server_ip_or_name == NULL && !context->is_server) {
         usage();
+    }
+
+    // Check if client is using comma-separated server list
+    context->server_count = 0;
+    if (!context->is_server && context->server_ip_or_name != NULL &&
+        strchr(context->server_ip_or_name, ',') != NULL) {
+        // Parse comma-separated server list
+        if (parse_server_list(context, context->server_ip_or_name) != 0) {
+            fprintf(stderr, "Failed to parse server list\n");
+            cleanup_context(context);
+            free(context);
+            return 1;
+        }
+        // Clear server_ip_or_name to indicate multi-server mode
+        context->server_ip_or_name = NULL;
     }
     context->server_port      = (argc <= arg_start + 2 || strcmp(argv[arg_start + 2], "auto") == 0)
                                     ? DEFAULT_PORT

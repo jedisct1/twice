@@ -72,6 +72,9 @@
 #define MAX_PEERS 32          // Maximum number of simultaneous peers
 #define PEER_TIMEOUT_MS 30000 // 30 seconds of inactivity before peer removal
 
+// Multi-server support for client
+#define MAX_SERVERS 8 // Maximum number of server addresses for client
+
 #if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && \
     __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__ && !defined(NATIVE_BIG_ENDIAN)
 #define NATIVE_BIG_ENDIAN
@@ -119,6 +122,15 @@ typedef struct Peer_ {
     struct timespec         last_seen;          // Last activity timestamp
     char                    ip_str[NI_MAXHOST]; // String representation of IP
 } Peer;
+
+// Server endpoint structure for client multi-server support
+typedef struct ServerEndpoint_ {
+    struct sockaddr_storage addr;               // Server address
+    socklen_t               addr_len;           // Address length
+    char                    hostname[256];      // Original hostname/IP
+    char                    ip_str[NI_MAXHOST]; // Resolved IP string
+    int                     active;             // Whether this server is reachable
+} ServerEndpoint;
 
 // Reordering state for a connection
 typedef struct ReorderState_ {
