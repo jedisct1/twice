@@ -751,6 +751,7 @@ static inline int hiae_constant_time_compare(const uint8_t *a, const uint8_t *b,
 }
 
 /* Software AES implementation from softaes.h */
+#define SOFTAES_ENABLED
 
 #ifndef CRYPTO_ALIGN
 #if defined(__INTEL_COMPILER) || defined(_MSC_VER)
@@ -3717,7 +3718,6 @@ static void HiAE_init_arm(HiAE_state_t *state_opaque, const uint8_t *key, const 
     state[14]            = ze;
     state[15]            = hiae_arm_SIMD_XOR(c0, c1);
 
-    hiae_arm_DATA128b tmp[STATE];
     hiae_arm_init_update(state, k0, k1);
     hiae_arm_init_update(state, k0, k1);
 
@@ -5100,6 +5100,16 @@ static void hiae_init_dispatch(void)
         }
 #endif
     }
+#endif
+
+#ifdef SOFTAES_ENABLED
+    (void) softaes_block_zero;
+    (void) softaes_block_load;
+    (void) softaes_block_load64x2;
+    (void) softaes_block_store;
+    (void) softaes_block_xor;
+    (void) softaes_block_and;
+    (void) softaes_block_encrypt;
 #endif
 }
 
