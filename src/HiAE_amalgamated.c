@@ -818,8 +818,7 @@ static inline SoftAesBlock softaes_block_load(const uint8_t in[16])
     return out;
 }
 
-__attribute__((unused)) static inline SoftAesBlock softaes_block_load64x2(const uint64_t a,
-                                                                          const uint64_t b)
+static inline SoftAesBlock softaes_block_load64x2(const uint64_t a, const uint64_t b)
 {
     const SoftAesBlock out = { (uint32_t) b, (uint32_t) (b >> 32), (uint32_t) a,
                                (uint32_t) (a >> 32) };
@@ -1151,8 +1150,7 @@ static inline SoftAesBlock softaes_block_xaesl(SoftAesBlock block, const SoftAes
     return softaes_block_aesl(block);
 }
 
-__attribute__((unused)) static inline SoftAesBlock softaes_block_encrypt(const SoftAesBlock block,
-                                                                         const SoftAesBlock rk)
+static inline SoftAesBlock softaes_block_encrypt(const SoftAesBlock block, const SoftAesBlock rk)
 {
     SoftAesBlock out = softaes_block_aesl(block);
     out.w0 ^= rk.w0;
@@ -1266,24 +1264,25 @@ static inline void hiae_software_state_shift(hiae_software_DATA128b *state,
 }
 
 static inline void hiae_software_init_update(hiae_software_DATA128b *state,
-                                             hiae_software_DATA128b *tmp, hiae_software_DATA128b c0)
+                                             hiae_software_DATA128b *tmp, hiae_software_DATA128b c0,
+                                             hiae_software_DATA128b c1)
 {
     hiae_software_update_state_offset(state, tmp, c0, 0);
-    hiae_software_update_state_offset(state, tmp, c0, 1);
+    hiae_software_update_state_offset(state, tmp, c1, 1);
     hiae_software_update_state_offset(state, tmp, c0, 2);
-    hiae_software_update_state_offset(state, tmp, c0, 3);
+    hiae_software_update_state_offset(state, tmp, c1, 3);
     hiae_software_update_state_offset(state, tmp, c0, 4);
-    hiae_software_update_state_offset(state, tmp, c0, 5);
+    hiae_software_update_state_offset(state, tmp, c1, 5);
     hiae_software_update_state_offset(state, tmp, c0, 6);
-    hiae_software_update_state_offset(state, tmp, c0, 7);
+    hiae_software_update_state_offset(state, tmp, c1, 7);
     hiae_software_update_state_offset(state, tmp, c0, 8);
-    hiae_software_update_state_offset(state, tmp, c0, 9);
+    hiae_software_update_state_offset(state, tmp, c1, 9);
     hiae_software_update_state_offset(state, tmp, c0, 10);
-    hiae_software_update_state_offset(state, tmp, c0, 11);
+    hiae_software_update_state_offset(state, tmp, c1, 11);
     hiae_software_update_state_offset(state, tmp, c0, 12);
-    hiae_software_update_state_offset(state, tmp, c0, 13);
+    hiae_software_update_state_offset(state, tmp, c1, 13);
     hiae_software_update_state_offset(state, tmp, c0, 14);
-    hiae_software_update_state_offset(state, tmp, c0, 15);
+    hiae_software_update_state_offset(state, tmp, c1, 15);
 }
 
 static inline void hiae_software_ad_update(hiae_software_DATA128b *state,
@@ -1445,29 +1444,26 @@ static void HiAE_init_software(HiAE_state_t *state_opaque, const uint8_t *key, c
 
     hiae_software_DATA128b ze = hiae_software_SIMD_ZERO_128();
     state[0]                  = c0;
-    state[1]                  = k1;
-    state[2]                  = N;
-    state[3]                  = c0;
+    state[1]                  = k0;
+    state[2]                  = c0;
+    state[3]                  = N;
     state[4]                  = ze;
-    state[5]                  = hiae_software_SIMD_XOR(N, k0);
+    state[5]                  = k0;
     state[6]                  = ze;
     state[7]                  = c1;
-    state[8]                  = hiae_software_SIMD_XOR(N, k1);
+    state[8]                  = k1;
     state[9]                  = ze;
-    state[10]                 = k1;
+    state[10]                 = hiae_software_SIMD_XOR(N, k1);
     state[11]                 = c0;
     state[12]                 = c1;
     state[13]                 = k1;
     state[14]                 = ze;
     state[15]                 = hiae_software_SIMD_XOR(c0, c1);
 
-    /* 32 consecutive updates with C0 */
     hiae_software_DATA128b tmp[STATE];
-    hiae_software_init_update(state, tmp, c0);
-    hiae_software_init_update(state, tmp, c0);
+    hiae_software_init_update(state, tmp, k0, k1);
+    hiae_software_init_update(state, tmp, k0, k1);
 
-    state[9]  = hiae_software_SIMD_XOR(state[9], k0);
-    state[13] = hiae_software_SIMD_XOR(state[13], k1);
     memcpy(state_opaque->opaque, state, sizeof(state));
 }
 
@@ -1515,8 +1511,8 @@ static void HiAE_finalize_software(HiAE_state_t *state_opaque, uint64_t ad_len, 
     lens[1] = msg_len * 8;
     hiae_software_DATA128b temp, tmp[STATE];
     temp = hiae_software_SIMD_LOAD((uint8_t *) lens);
-    hiae_software_init_update(state, tmp, temp);
-    hiae_software_init_update(state, tmp, temp);
+    hiae_software_init_update(state, tmp, temp, temp);
+    hiae_software_init_update(state, tmp, temp, temp);
     temp = state[0];
     for (size_t i = 1; i < STATE; ++i) {
         temp = hiae_software_SIMD_XOR(temp, state[i]);
@@ -1825,24 +1821,24 @@ static inline void hiae_aesni_state_shift(hiae_aesni_DATA128b *state)
 }
 
 static inline void hiae_aesni_init_update(hiae_aesni_DATA128b *state, hiae_aesni_DATA128b *tmp,
-                                          hiae_aesni_DATA128b c0)
+                                          hiae_aesni_DATA128b c0, hiae_aesni_DATA128b c1)
 {
     hiae_aesni_update_state_offset(state, tmp, c0, 0);
-    hiae_aesni_update_state_offset(state, tmp, c0, 1);
+    hiae_aesni_update_state_offset(state, tmp, c1, 1);
     hiae_aesni_update_state_offset(state, tmp, c0, 2);
-    hiae_aesni_update_state_offset(state, tmp, c0, 3);
+    hiae_aesni_update_state_offset(state, tmp, c1, 3);
     hiae_aesni_update_state_offset(state, tmp, c0, 4);
-    hiae_aesni_update_state_offset(state, tmp, c0, 5);
+    hiae_aesni_update_state_offset(state, tmp, c1, 5);
     hiae_aesni_update_state_offset(state, tmp, c0, 6);
-    hiae_aesni_update_state_offset(state, tmp, c0, 7);
+    hiae_aesni_update_state_offset(state, tmp, c1, 7);
     hiae_aesni_update_state_offset(state, tmp, c0, 8);
-    hiae_aesni_update_state_offset(state, tmp, c0, 9);
+    hiae_aesni_update_state_offset(state, tmp, c1, 9);
     hiae_aesni_update_state_offset(state, tmp, c0, 10);
-    hiae_aesni_update_state_offset(state, tmp, c0, 11);
+    hiae_aesni_update_state_offset(state, tmp, c1, 11);
     hiae_aesni_update_state_offset(state, tmp, c0, 12);
-    hiae_aesni_update_state_offset(state, tmp, c0, 13);
+    hiae_aesni_update_state_offset(state, tmp, c1, 13);
     hiae_aesni_update_state_offset(state, tmp, c0, 14);
-    hiae_aesni_update_state_offset(state, tmp, c0, 15);
+    hiae_aesni_update_state_offset(state, tmp, c1, 15);
 }
 
 static inline void hiae_aesni_ad_update(hiae_aesni_DATA128b *state, hiae_aesni_DATA128b *tmp,
@@ -2042,16 +2038,16 @@ static void HiAE_init_aesni(HiAE_state_t *state_opaque, const uint8_t *key, cons
 
     hiae_aesni_DATA128b ze = hiae_aesni_SIMD_ZERO_128();
     state[0]               = c0;
-    state[1]               = k1;
-    state[2]               = N;
-    state[3]               = c0;
+    state[1]               = k0;
+    state[2]               = c0;
+    state[3]               = N;
     state[4]               = ze;
-    state[5]               = hiae_aesni_SIMD_XOR(N, k0);
+    state[5]               = k0;
     state[6]               = ze;
     state[7]               = c1;
-    state[8]               = hiae_aesni_SIMD_XOR(N, k1);
+    state[8]               = k1;
     state[9]               = ze;
-    state[10]              = k1;
+    state[10]              = hiae_aesni_SIMD_XOR(N, k1);
     state[11]              = c0;
     state[12]              = c1;
     state[13]              = k1;
@@ -2059,11 +2055,9 @@ static void HiAE_init_aesni(HiAE_state_t *state_opaque, const uint8_t *key, cons
     state[15]              = hiae_aesni_SIMD_XOR(c0, c1);
 
     hiae_aesni_DATA128b tmp[STATE];
-    hiae_aesni_init_update(state, tmp, c0);
-    hiae_aesni_init_update(state, tmp, c0);
+    hiae_aesni_init_update(state, tmp, k0, k1);
+    hiae_aesni_init_update(state, tmp, k0, k1);
 
-    state[9]  = hiae_aesni_SIMD_XOR(state[9], k0);
-    state[13] = hiae_aesni_SIMD_XOR(state[13], k1);
     memcpy(state_opaque->opaque, state, sizeof(state));
 }
 
@@ -2110,8 +2104,8 @@ static void HiAE_finalize_aesni(HiAE_state_t *state_opaque, uint64_t ad_len, uin
     lens[1] = msg_len * 8;
     hiae_aesni_DATA128b temp, tmp[STATE];
     temp = hiae_aesni_SIMD_LOAD((uint8_t *) lens);
-    hiae_aesni_init_update(state, tmp, temp);
-    hiae_aesni_init_update(state, tmp, temp);
+    hiae_aesni_init_update(state, tmp, temp, temp);
+    hiae_aesni_init_update(state, tmp, temp, temp);
     temp = state[0];
     for (size_t i = 1; i < STATE; ++i) {
         temp = hiae_aesni_SIMD_XOR(temp, state[i]);
@@ -2455,24 +2449,25 @@ static inline void hiae_vaes_avx512_state_shift(hiae_vaes_avx512_DATA128b *state
 
 static inline void hiae_vaes_avx512_init_update(hiae_vaes_avx512_DATA128b *state,
                                                 hiae_vaes_avx512_DATA128b *tmp,
-                                                hiae_vaes_avx512_DATA128b  c0)
+                                                hiae_vaes_avx512_DATA128b  c0,
+                                                hiae_vaes_avx512_DATA128b  c1)
 {
     hiae_vaes_avx512_update_state_offset(state, tmp, c0, 0);
-    hiae_vaes_avx512_update_state_offset(state, tmp, c0, 1);
+    hiae_vaes_avx512_update_state_offset(state, tmp, c1, 1);
     hiae_vaes_avx512_update_state_offset(state, tmp, c0, 2);
-    hiae_vaes_avx512_update_state_offset(state, tmp, c0, 3);
+    hiae_vaes_avx512_update_state_offset(state, tmp, c1, 3);
     hiae_vaes_avx512_update_state_offset(state, tmp, c0, 4);
-    hiae_vaes_avx512_update_state_offset(state, tmp, c0, 5);
+    hiae_vaes_avx512_update_state_offset(state, tmp, c1, 5);
     hiae_vaes_avx512_update_state_offset(state, tmp, c0, 6);
-    hiae_vaes_avx512_update_state_offset(state, tmp, c0, 7);
+    hiae_vaes_avx512_update_state_offset(state, tmp, c1, 7);
     hiae_vaes_avx512_update_state_offset(state, tmp, c0, 8);
-    hiae_vaes_avx512_update_state_offset(state, tmp, c0, 9);
+    hiae_vaes_avx512_update_state_offset(state, tmp, c1, 9);
     hiae_vaes_avx512_update_state_offset(state, tmp, c0, 10);
-    hiae_vaes_avx512_update_state_offset(state, tmp, c0, 11);
+    hiae_vaes_avx512_update_state_offset(state, tmp, c1, 11);
     hiae_vaes_avx512_update_state_offset(state, tmp, c0, 12);
-    hiae_vaes_avx512_update_state_offset(state, tmp, c0, 13);
+    hiae_vaes_avx512_update_state_offset(state, tmp, c1, 13);
     hiae_vaes_avx512_update_state_offset(state, tmp, c0, 14);
-    hiae_vaes_avx512_update_state_offset(state, tmp, c0, 15);
+    hiae_vaes_avx512_update_state_offset(state, tmp, c1, 15);
 }
 
 static void HiAE_init_vaes(HiAE_state_t *state_opaque, const uint8_t *key, const uint8_t *nonce)
@@ -2487,16 +2482,16 @@ static void HiAE_init_vaes(HiAE_state_t *state_opaque, const uint8_t *key, const
 
     hiae_vaes_avx512_DATA128b ze = hiae_vaes_avx512_SIMD_ZERO_128();
     state[0]                     = c0;
-    state[1]                     = k1;
-    state[2]                     = N;
-    state[3]                     = c0;
+    state[1]                     = k0;
+    state[2]                     = c0;
+    state[3]                     = N;
     state[4]                     = ze;
-    state[5]                     = hiae_vaes_avx512_SIMD_XOR(N, k0);
+    state[5]                     = k0;
     state[6]                     = ze;
     state[7]                     = c1;
-    state[8]                     = hiae_vaes_avx512_SIMD_XOR(N, k1);
+    state[8]                     = k1;
     state[9]                     = ze;
-    state[10]                    = k1;
+    state[10]                    = hiae_vaes_avx512_SIMD_XOR(N, k1);
     state[11]                    = c0;
     state[12]                    = c1;
     state[13]                    = k1;
@@ -2504,11 +2499,9 @@ static void HiAE_init_vaes(HiAE_state_t *state_opaque, const uint8_t *key, const
     state[15]                    = hiae_vaes_avx512_SIMD_XOR(c0, c1);
 
     hiae_vaes_avx512_DATA128b tmp[STATE];
-    hiae_vaes_avx512_init_update(state, tmp, c0);
-    hiae_vaes_avx512_init_update(state, tmp, c0);
+    hiae_vaes_avx512_init_update(state, tmp, k0, k1);
+    hiae_vaes_avx512_init_update(state, tmp, k0, k1);
 
-    state[9]  = hiae_vaes_avx512_SIMD_XOR(state[9], k0);
-    state[13] = hiae_vaes_avx512_SIMD_XOR(state[13], k1);
     memcpy(state_opaque->opaque, state, sizeof(state));
 }
 
@@ -2739,8 +2732,8 @@ static void HiAE_finalize_vaes(HiAE_state_t *state_opaque, uint64_t ad_len, uint
     lens[1] = msg_len * 8;
     hiae_vaes_avx512_DATA128b temp, tmp[STATE];
     temp = hiae_vaes_avx512_SIMD_LOAD((uint8_t *) lens);
-    hiae_vaes_avx512_init_update(state, tmp, temp);
-    hiae_vaes_avx512_init_update(state, tmp, temp);
+    hiae_vaes_avx512_init_update(state, tmp, temp, temp);
+    hiae_vaes_avx512_init_update(state, tmp, temp, temp);
     temp = state[0];
     for (size_t i = 1; i < STATE; ++i) {
         temp = hiae_vaes_avx512_SIMD_XOR(temp, state[i]);
@@ -3514,24 +3507,25 @@ static inline void hiae_arm_state_shift(hiae_arm_DATA128b *state)
     state[15]              = temp;
 }
 
-static inline void hiae_arm_init_update(hiae_arm_DATA128b *state, hiae_arm_DATA128b c0)
+static inline void hiae_arm_init_update(hiae_arm_DATA128b *state, hiae_arm_DATA128b c0,
+                                        hiae_arm_DATA128b c1)
 {
     hiae_arm_update_state_offset(state, c0, 0);
-    hiae_arm_update_state_offset(state, c0, 1);
+    hiae_arm_update_state_offset(state, c1, 1);
     hiae_arm_update_state_offset(state, c0, 2);
-    hiae_arm_update_state_offset(state, c0, 3);
+    hiae_arm_update_state_offset(state, c1, 3);
     hiae_arm_update_state_offset(state, c0, 4);
-    hiae_arm_update_state_offset(state, c0, 5);
+    hiae_arm_update_state_offset(state, c1, 5);
     hiae_arm_update_state_offset(state, c0, 6);
-    hiae_arm_update_state_offset(state, c0, 7);
+    hiae_arm_update_state_offset(state, c1, 7);
     hiae_arm_update_state_offset(state, c0, 8);
-    hiae_arm_update_state_offset(state, c0, 9);
+    hiae_arm_update_state_offset(state, c1, 9);
     hiae_arm_update_state_offset(state, c0, 10);
-    hiae_arm_update_state_offset(state, c0, 11);
+    hiae_arm_update_state_offset(state, c1, 11);
     hiae_arm_update_state_offset(state, c0, 12);
-    hiae_arm_update_state_offset(state, c0, 13);
+    hiae_arm_update_state_offset(state, c1, 13);
     hiae_arm_update_state_offset(state, c0, 14);
-    hiae_arm_update_state_offset(state, c0, 15);
+    hiae_arm_update_state_offset(state, c1, 15);
 }
 
 static inline void hiae_arm_ad_update(hiae_arm_DATA128b *state, const uint8_t *ad, size_t i)
@@ -3707,27 +3701,26 @@ static void HiAE_init_arm(HiAE_state_t *state_opaque, const uint8_t *key, const 
 
     hiae_arm_DATA128b ze = hiae_arm_SIMD_ZERO_128();
     state[0]             = c0;
-    state[1]             = k1;
-    state[2]             = N;
-    state[3]             = c0;
+    state[1]             = k0;
+    state[2]             = c0;
+    state[3]             = N;
     state[4]             = ze;
-    state[5]             = hiae_arm_SIMD_XOR(N, k0);
+    state[5]             = k0;
     state[6]             = ze;
     state[7]             = c1;
-    state[8]             = hiae_arm_SIMD_XOR(N, k1);
+    state[8]             = k1;
     state[9]             = ze;
-    state[10]            = k1;
+    state[10]            = hiae_arm_SIMD_XOR(N, k1);
     state[11]            = c0;
     state[12]            = c1;
     state[13]            = k1;
     state[14]            = ze;
     state[15]            = hiae_arm_SIMD_XOR(c0, c1);
 
-    hiae_arm_init_update(state, c0);
-    hiae_arm_init_update(state, c0);
+    hiae_arm_DATA128b tmp[STATE];
+    hiae_arm_init_update(state, k0, k1);
+    hiae_arm_init_update(state, k0, k1);
 
-    state[9]  = hiae_arm_SIMD_XOR(state[9], k0);
-    state[13] = hiae_arm_SIMD_XOR(state[13], k1);
     memcpy(state_opaque->opaque, state, sizeof(state));
 }
 
@@ -3774,8 +3767,8 @@ static void HiAE_finalize_arm(HiAE_state_t *state_opaque, uint64_t ad_len, uint6
     lens[1] = msg_len * 8;
     hiae_arm_DATA128b temp;
     temp = hiae_arm_SIMD_LOAD((uint8_t *) lens);
-    hiae_arm_init_update(state, temp);
-    hiae_arm_init_update(state, temp);
+    hiae_arm_init_update(state, temp, temp);
+    hiae_arm_init_update(state, temp, temp);
     temp = state[0];
     for (size_t i = 1; i < STATE; ++i) {
         temp = hiae_arm_SIMD_XOR(temp, state[i]);
@@ -4130,24 +4123,25 @@ static inline void hiae_arm_sha3_state_shift(hiae_arm_sha3_DATA128b *state)
 }
 
 static inline void hiae_arm_sha3_init_update(hiae_arm_sha3_DATA128b *state,
-                                             hiae_arm_sha3_DATA128b *tmp, hiae_arm_sha3_DATA128b c0)
+                                             hiae_arm_sha3_DATA128b *tmp, hiae_arm_sha3_DATA128b c0,
+                                             hiae_arm_sha3_DATA128b c1)
 {
     hiae_arm_sha3_update_state_offset(state, tmp, c0, 0);
-    hiae_arm_sha3_update_state_offset(state, tmp, c0, 1);
+    hiae_arm_sha3_update_state_offset(state, tmp, c1, 1);
     hiae_arm_sha3_update_state_offset(state, tmp, c0, 2);
-    hiae_arm_sha3_update_state_offset(state, tmp, c0, 3);
+    hiae_arm_sha3_update_state_offset(state, tmp, c1, 3);
     hiae_arm_sha3_update_state_offset(state, tmp, c0, 4);
-    hiae_arm_sha3_update_state_offset(state, tmp, c0, 5);
+    hiae_arm_sha3_update_state_offset(state, tmp, c1, 5);
     hiae_arm_sha3_update_state_offset(state, tmp, c0, 6);
-    hiae_arm_sha3_update_state_offset(state, tmp, c0, 7);
+    hiae_arm_sha3_update_state_offset(state, tmp, c1, 7);
     hiae_arm_sha3_update_state_offset(state, tmp, c0, 8);
-    hiae_arm_sha3_update_state_offset(state, tmp, c0, 9);
+    hiae_arm_sha3_update_state_offset(state, tmp, c1, 9);
     hiae_arm_sha3_update_state_offset(state, tmp, c0, 10);
-    hiae_arm_sha3_update_state_offset(state, tmp, c0, 11);
+    hiae_arm_sha3_update_state_offset(state, tmp, c1, 11);
     hiae_arm_sha3_update_state_offset(state, tmp, c0, 12);
-    hiae_arm_sha3_update_state_offset(state, tmp, c0, 13);
+    hiae_arm_sha3_update_state_offset(state, tmp, c1, 13);
     hiae_arm_sha3_update_state_offset(state, tmp, c0, 14);
-    hiae_arm_sha3_update_state_offset(state, tmp, c0, 15);
+    hiae_arm_sha3_update_state_offset(state, tmp, c1, 15);
 }
 
 static inline void hiae_arm_sha3_ad_update(hiae_arm_sha3_DATA128b *state,
@@ -4325,16 +4319,16 @@ static void HiAE_init_arm_sha3(HiAE_state_t *state_opaque, const uint8_t *key, c
 
     hiae_arm_sha3_DATA128b ze = hiae_arm_sha3_SIMD_ZERO_128();
     state[0]                  = c0;
-    state[1]                  = k1;
-    state[2]                  = N;
-    state[3]                  = c0;
+    state[1]                  = k0;
+    state[2]                  = c0;
+    state[3]                  = N;
     state[4]                  = ze;
-    state[5]                  = hiae_arm_sha3_SIMD_XOR(N, k0);
+    state[5]                  = k0;
     state[6]                  = ze;
     state[7]                  = c1;
-    state[8]                  = hiae_arm_sha3_SIMD_XOR(N, k1);
+    state[8]                  = k1;
     state[9]                  = ze;
-    state[10]                 = k1;
+    state[10]                 = hiae_arm_sha3_SIMD_XOR(N, k1);
     state[11]                 = c0;
     state[12]                 = c1;
     state[13]                 = k1;
@@ -4342,11 +4336,9 @@ static void HiAE_init_arm_sha3(HiAE_state_t *state_opaque, const uint8_t *key, c
     state[15]                 = hiae_arm_sha3_SIMD_XOR(c0, c1);
 
     hiae_arm_sha3_DATA128b tmp[STATE];
-    hiae_arm_sha3_init_update(state, tmp, c0);
-    hiae_arm_sha3_init_update(state, tmp, c0);
+    hiae_arm_sha3_init_update(state, tmp, k0, k1);
+    hiae_arm_sha3_init_update(state, tmp, k0, k1);
 
-    state[9]  = hiae_arm_sha3_SIMD_XOR(state[9], k0);
-    state[13] = hiae_arm_sha3_SIMD_XOR(state[13], k1);
     memcpy(state_opaque->opaque, state, sizeof(state));
 }
 
@@ -4393,8 +4385,8 @@ static void HiAE_finalize_arm_sha3(HiAE_state_t *state_opaque, uint64_t ad_len, 
     lens[1] = msg_len * 8;
     hiae_arm_sha3_DATA128b temp, tmp[STATE];
     temp = hiae_arm_sha3_SIMD_LOAD((uint8_t *) lens);
-    hiae_arm_sha3_init_update(state, tmp, temp);
-    hiae_arm_sha3_init_update(state, tmp, temp);
+    hiae_arm_sha3_init_update(state, tmp, temp, temp);
+    hiae_arm_sha3_init_update(state, tmp, temp, temp);
 
     // Use EOR3 to compute the final tag more efficiently
     // First, XOR groups of 3 states together
