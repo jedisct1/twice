@@ -929,18 +929,6 @@ static int event_loop(Context *context)
                 return 0;
             }
 
-            // Update client address
-            memcpy(&context->client_addr, &from_addr, from_addr_len);
-            context->client_addr_len = from_addr_len;
-            if (!context->client_connected) {
-                char client_ip[NI_MAXHOST];
-                getnameinfo((const struct sockaddr *) &from_addr, from_addr_len, client_ip,
-                            sizeof client_ip, NULL, 0, NI_NUMERICHOST | NI_NUMERICSERV);
-                printf("Client connected from [%s]\n", client_ip);
-                strcpy(context->client_ip, client_ip);
-                context->client_connected = 1;
-            }
-
             // Extract header
             PacketHeader header;
             memcpy(&header, packet_buf, sizeof(PacketHeader));
@@ -994,6 +982,18 @@ static int event_loop(Context *context)
                 }
                 // Data is not encrypted, use as-is
                 final_data = encrypted_data;
+            }
+
+            // Update client address only after successful authentication
+            memcpy(&context->client_addr, &from_addr, from_addr_len);
+            context->client_addr_len = from_addr_len;
+            if (!context->client_connected) {
+                char client_ip[NI_MAXHOST];
+                getnameinfo((const struct sockaddr *) &from_addr, from_addr_len, client_ip,
+                            sizeof client_ip, NULL, 0, NI_NUMERICHOST | NI_NUMERICSERV);
+                printf("Client connected from [%s]\n", client_ip);
+                strcpy(context->client_ip, client_ip);
+                context->client_connected = 1;
             }
 
             if (data_len > MAX_PACKET_LEN) {
