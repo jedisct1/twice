@@ -103,7 +103,7 @@ typedef struct __attribute__((aligned(16))) UdpBuf_ {
 typedef struct BufferedPacket_ {
     int             occupied;             // Whether this slot is in use
     uint64_t        counter;              // Packet counter value
-    uint16_t        len;                  // Data length
+    size_t          len;                  // Data length
     struct timespec timestamp;            // When packet was buffered
     unsigned char   data[MAX_PACKET_LEN]; // Packet data (preallocated)
 } BufferedPacket;

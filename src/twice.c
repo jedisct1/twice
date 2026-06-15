@@ -854,8 +854,8 @@ static int event_loop(Context *context)
 
             if (sendmsg(context->udp_fd, &msg, 0) < 0) {
                 if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    // A server send error must not tear down the listening socket.
                     perror("Unable to send UDP packet to client");
-                    return client_reconnect(context);
                 }
             }
         } else if (!context->is_server && context->udp_fd != -1) {
@@ -910,10 +910,14 @@ static int event_loop(Context *context)
 
     // Handle UDP socket events
     if ((fds[POLLFD_UDP].revents & POLLERR) || (fds[POLLFD_UDP].revents & POLLHUP)) {
-        puts("UDP socket error");
-        return client_reconnect(context);
+        // Only the client reconnects; the server keeps its listening socket and
+        // drains the error through recvfrom below.
+        if (!context->is_server) {
+            puts("UDP socket error");
+            return client_reconnect(context);
+        }
     }
-    if (fds[POLLFD_UDP].revents & POLLIN) {
+    if (fds[POLLFD_UDP].revents & (POLLIN | POLLERR | POLLHUP)) {
         if (context->is_server) {
             // Server: receive from any client and track the latest one
             struct sockaddr_storage from_addr;
