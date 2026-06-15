@@ -424,7 +424,7 @@ To find the optimal MTU for your network path:
 ## Differences from DSVPN
 
 - Uses UDP instead of TCP transport
-- Optional HiAE encryption instead of mandatory XChaCha20-Poly1305
+- Optional HiAE encryption instead of Charm
 - Always includes authentication tags (HiAE_mac with zero key when no encryption)
 - No key exchange - uses pre-shared keys when encryption is enabled
 - Single client per server (latest client wins)
