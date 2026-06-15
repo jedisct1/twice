@@ -341,11 +341,19 @@ static int client_reconnect(Context *context)
 // Initialize reorder state
 static void reorder_init(ReorderState *state)
 {
-    memset(state, 0, sizeof(*state));
-    state->expected_counter = 1; // Start expecting counter 1 (first packet has ++counter = 1)
-    state->window_base      = 1;
+    state->expected_counter   = 1; // Start expecting counter 1 (first packet has ++counter = 1)
+    state->highest_processed  = 0;
+    state->random_value       = 0;
+    state->random_initialized = 0;
+    state->window_base        = 1;
+    state->packets_received   = 0;
+    state->packets_duplicated = 0;
+    state->packets_reordered  = 0;
+    state->packets_lost       = 0;
 
-    // Mark all buffer slots as unoccupied
+    // Mark all buffer slots as unoccupied. A slot's data buffer is never read
+    // while it is unoccupied, so the megabytes of per-slot payload storage do
+    // not need to be cleared here.
     for (int i = 0; i < REORDER_WINDOW_SIZE; i++) {
         state->buffer[i].occupied = 0;
     }
@@ -371,43 +379,39 @@ static uint64_t get_time_ms(void)
 // Check if we should process buffered packets due to timeout
 static void reorder_check_timeouts(Context *context)
 {
-    ReorderState *state    = &context->reorder;
-    uint64_t      now_ms   = get_time_ms();
-    int           advanced = 0;
+    ReorderState *state       = &context->reorder;
+    uint64_t      now_ms      = get_time_ms();
+    uint64_t      min_counter = 0;
+    int           have_min    = 0;
+    int           have_old    = 0;
 
     for (int i = 0; i < REORDER_WINDOW_SIZE; i++) {
         BufferedPacket *pkt = &state->buffer[i];
-        if (pkt->occupied) {
-            uint64_t pkt_age_ms =
-                now_ms - (pkt->timestamp.tv_sec * 1000 + pkt->timestamp.tv_nsec / 1000000);
-            if (pkt_age_ms > REORDER_TIMEOUT_MS) {
-                // This packet is too old, we need to skip ahead
-                if (pkt->counter > state->expected_counter) {
-                    fprintf(stderr,
-                            "Timeout: skipping from counter %llu to %llu (lost %llu packets)\n",
-                            (unsigned long long) state->expected_counter,
-                            (unsigned long long) pkt->counter,
-                            (unsigned long long) (pkt->counter - state->expected_counter));
-                    state->packets_lost += (pkt->counter - state->expected_counter);
-
-                    // Deliver the timed-out packet
-                    if (tun_write(context->tun_fd, pkt->data, pkt->len) != (ssize_t) pkt->len) {
-                        perror("tun_write (timeout)");
-                    }
-                    pkt->occupied = 0;
-
-                    state->expected_counter  = pkt->counter + 1;
-                    state->window_base       = state->expected_counter;
-                    state->highest_processed = pkt->counter;
-                    advanced                 = 1;
-                    break;
-                }
-            }
+        if (!pkt->occupied) {
+            continue;
+        }
+        if (!have_min || pkt->counter < min_counter) {
+            min_counter = pkt->counter;
+            have_min    = 1;
+        }
+        uint64_t pkt_age_ms =
+            now_ms - (pkt->timestamp.tv_sec * 1000 + pkt->timestamp.tv_nsec / 1000000);
+        if (pkt_age_ms > REORDER_TIMEOUT_MS) {
+            have_old = 1;
         }
     }
 
-    // If we advanced, try to deliver any buffered packets that are now in sequence
-    if (advanced) {
+    // Once a buffered packet has waited past the timeout, stop waiting for the
+    // gap and resume from the lowest buffered counter. Skipping to the lowest
+    // counter (rather than to whichever timed-out slot is found first) keeps
+    // deliveries ordered and never strands a lower-numbered buffered packet.
+    if (have_old && have_min && min_counter > state->expected_counter) {
+        fprintf(stderr, "Timeout: skipping from counter %llu to %llu (lost %llu packets)\n",
+                (unsigned long long) state->expected_counter, (unsigned long long) min_counter,
+                (unsigned long long) (min_counter - state->expected_counter));
+        state->packets_lost += (min_counter - state->expected_counter);
+        state->expected_counter = min_counter;
+        state->window_base      = min_counter;
         reorder_deliver_buffered(context);
     }
 }
