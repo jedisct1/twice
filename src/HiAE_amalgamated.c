@@ -15,10 +15,8 @@
 #define HIAE_AMALGAMATED_H
 
 /* Standard C library includes */
-#include <assert.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <string.h>
 
 /* Platform-specific includes */
 #ifdef __linux__
@@ -34,6 +32,9 @@
 #endif
 #if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
 #include <intrin.h>
+#endif
+#ifdef __wasm_simd128__
+#include <wasm_simd128.h>
 #endif
 
 /* Architecture-specific intrinsics */
@@ -677,6 +678,151 @@ void HiAE_dec_partial_noupdate(HiAE_state_t *state, uint8_t *mi, const uint8_t *
 
 /** @} */
 
+/* Shared definitions from src/common/common.h */
+#include <stddef.h>
+#include <stdint.h>
+
+/* Freestanding WebAssembly comes without a libc, so only compiler builtins can be used there. */
+#if defined(__wasm__) && !defined(__wasi__) && !defined(__EMSCRIPTEN__)
+#define memcpy(A, B, C) __builtin_memcpy((A), (B), (C))
+#define memset(A, B, C) __builtin_memset((A), (B), (C))
+#define strcmp(A, B) hiae_strcmp((A), (B))
+static inline int hiae_strcmp(const char *a, const char *b)
+{
+    while (*a != 0 && *a == *b) {
+        a++;
+        b++;
+    }
+    return (int) (unsigned char) *a - (int) (unsigned char) *b;
+}
+#ifdef NDEBUG
+#define assert(X) ((void) 0)
+#else
+#define assert(X) ((X) ? (void) 0 : __builtin_trap())
+#endif
+#else
+#include <assert.h>
+#include <string.h>
+#endif
+
+/*
+ * Compiler / target capability detection shared by every translation unit.
+ *
+ * This header must be included by all implementation files and by the
+ * dispatchers, so that all of them agree on which implementations exist.
+ * Keeping this block in a single place is what prevents two translation
+ * units from disagreeing about the availability of an implementation.
+ */
+
+#ifdef __linux__
+#define HAVE_SYS_AUXV_H
+#define HAVE_GETAUXVAL
+#endif
+#ifdef __ANDROID_API__
+#if __ANDROID_API__ < 18
+#undef HAVE_GETAUXVAL
+#endif
+#define HAVE_ANDROID_GETCPUFEATURES
+#endif
+#if defined(__i386__) || defined(_M_IX86) || defined(__x86_64__) || defined(_M_AMD64)
+#define HAVE_CPUID
+#define NATIVE_LITTLE_ENDIAN
+#if defined(__clang__) || defined(__GNUC__)
+#define HAVE_AVX_ASM
+#endif
+#define HAVE_AVXINTRIN_H
+#define HAVE_AVX2INTRIN_H
+#define HAVE_AVX512FINTRIN_H
+#define HAVE_TMMINTRIN_H
+#define HAVE_WMMINTRIN_H
+#define HAVE_VAESINTRIN_H
+#ifdef __GNUC__
+#if !__has_include(<vaesintrin.h>)
+#undef HAVE_VAESINTRIN_H
+#endif
+#endif
+/* target pragmas don't define these flags on clang-cl (an alternative clang driver for Windows) */
+#if defined(__clang__) && defined(_MSC_BUILD) && defined(_MSC_VER) && \
+    (defined(_M_IX86) || defined(_M_AMD64)) && !defined(__SSE3__)
+#undef __SSE3__
+#undef __SSSE3__
+#undef __SSE4_1__
+#undef __AVX__
+#undef __AVX2__
+#undef __AVX512F__
+#undef __AES__
+#undef __VAES__
+
+#define __SSE3__ 1
+#define __SSSE3__ 1
+#define __SSE4_1__ 1
+#define __AVX__ 1
+#define __AVX2__ 1
+#define __AVX512F__ 1
+#define __AES__ 1
+#define __VAES__ 1
+
+/*
+ * The macros above were synthesized so that the intrinsics headers expose
+ * everything the target pragmas can emit. They describe the compiler, not
+ * the CPU the code will run on, and must therefore never be used to decide
+ * which implementations get compiled in. See cpu.h.
+ */
+#define HIAE_ISA_MACROS_SYNTHESIZED 1
+#endif
+
+#endif
+
+#ifdef DISABLE_AVX2
+#undef HAVE_AVXINTRIN_H
+#undef HAVE_AVX2INTRIN_H
+#undef HAVE_AVX512FINTRIN_H
+#undef HAVE_VAESINTRIN_H
+#endif
+#ifdef DISABLE_AVX512
+#undef HAVE_AVX512FINTRIN_H
+#endif
+
+/* The C0 and C1 constants from the specification, which the parallel variants use in every lane */
+#define HIAE_C0_BYTES \
+    0x32, 0x43, 0xf6, 0xa8, 0x88, 0x5a, 0x30, 0x8d, 0x31, 0x31, 0x98, 0xa2, 0xe0, 0x37, 0x07, 0x34
+#define HIAE_C1_BYTES \
+    0x4a, 0x40, 0x93, 0x82, 0x22, 0x99, 0xf3, 0x1d, 0x00, 0x82, 0xef, 0xa9, 0x8e, 0xc4, 0xe6, 0xc8
+
+/* Shared definitions from src/common/cpu.h */
+
+/*
+ * HIAE*_HAS_HW_AES is set when the compilation baseline itself guarantees that
+ * a hardware implementation of the corresponding variant is present. In that
+ * case the software implementation is not compiled in at all.
+ *
+ * Every translation unit that needs to know whether the software
+ * implementation exists must test these macros, and only these macros.
+ * Testing __AES__ & friends directly is not equivalent: on clang-cl they are
+ * synthesized in common.h so that the intrinsics headers work, and they then
+ * describe the compiler rather than the target CPU.
+ */
+
+#if defined(__ARM_FEATURE_CRYPTO)
+#define HIAE_HAS_HW_AES
+#define HIAEX2_HAS_HW_AES
+#define HIAEX4_HAS_HW_AES
+#elif !defined(HIAE_ISA_MACROS_SYNTHESIZED)
+#if defined(__AES__) && defined(__VAES__) && defined(__AVX512F__)
+#define HIAE_HAS_HW_AES
+#endif
+#if defined(__AES__) && defined(__VAES__) && defined(__AVX512F__) && defined(__AVX512VL__)
+#define HIAEX4_HAS_HW_AES
+#endif
+#if defined(__AES__) && defined(__VAES__) && defined(__AVX2__)
+#define HIAEX2_HAS_HW_AES
+#endif
+#endif
+
+#if defined(__ARM_FEATURE_SHA3)
+#define HIAE_HAS_HW_SHA3
+#endif
+
 /* Internal definitions from HiAE_internal.h */
 
 /* Implementation function table */
@@ -685,6 +831,7 @@ typedef struct {
     void (*init)(HiAE_state_t *state, const uint8_t *key, const uint8_t *nonce);
     void (*absorb)(HiAE_state_t *state, const uint8_t *ad, size_t len);
     void (*finalize)(HiAE_state_t *state, uint64_t ad_len, uint64_t msg_len, uint8_t *tag);
+    int (*verify)(HiAE_state_t *state, uint64_t ad_len, uint64_t msg_len, const uint8_t *tag);
     void (*enc)(HiAE_state_t *state, uint8_t *ci, const uint8_t *mi, size_t size);
     void (*dec)(HiAE_state_t *state, uint8_t *mi, const uint8_t *ci, size_t size);
     void (*enc_partial_noupdate)(HiAE_state_t *state, uint8_t *ci, const uint8_t *mi, size_t size);
@@ -737,20 +884,51 @@ static const uint8_t C0[BLOCK_SIZE] = { 0x32, 0x43, 0xf6, 0xa8, 0x88, 0x5a, 0x30
 static const uint8_t C1[BLOCK_SIZE] = { 0x4a, 0x40, 0x93, 0x82, 0x22, 0x99, 0xf3, 0x1d,
                                         0x00, 0x82, 0xef, 0xa9, 0x8e, 0xc4, 0xe6, 0xc8 };
 
+/* Finalizes the state and checks the tag without exposing the computed one */
+int hiae_verify(HiAE_state_t *state, uint64_t ad_len, uint64_t msg_len, const uint8_t *tag);
+
 /* Internal helper functions */
 static inline int hiae_constant_time_compare(const uint8_t *a, const uint8_t *b, size_t len)
 {
-    volatile uint8_t result = 0;
-    for (size_t i = 0; i < len; i++) {
-        result |= a[i] ^ b[i];
+    uint16_t acc = 0U;
+    size_t   i   = 0U;
+
+#if defined(__GNUC__) || defined(__clang__)
+    {
+        uint64_t acc64 = 0U;
+        uint64_t a64, b64;
+
+        for (; i + 8U <= len; i += 8U) {
+            memcpy(&a64, a + i, sizeof a64);
+            memcpy(&b64, b + i, sizeof b64);
+            acc64 |= a64 ^ b64;
+        }
+        acc64 |= acc64 >> 32;
+        acc64 |= acc64 >> 16;
+        acc64 |= acc64 >> 8;
+        acc = (uint16_t) (acc64 & 0xffU);
+    }
+#endif
+    for (; i < len; i++) {
+        acc |= a[i] ^ b[i];
     }
 #if defined(__GNUC__) || defined(__clang__)
-    __asm__("" : "+r"(result) :);
+    __asm__("" : "+r"(acc) :);
+    acc--;
+    acc >>= 15;
+
+    return (int) acc - 1;
+#else
+    {
+        volatile uint16_t result = acc;
+
+        return -(result != 0);
+    }
 #endif
-    return -(result != 0);
 }
 
 /* Software AES implementation from softaes.h */
+#define FAVOR_PERFORMANCE
 #define SOFTAES_ENABLED
 
 #ifndef CRYPTO_ALIGN
@@ -798,6 +976,168 @@ static inline uint32_t rotl32(const uint32_t x, const int b)
 {
     return (x << b) | (x >> (32 - b));
 }
+
+#if defined(__wasm_simd128__) && !defined(SOFTAES_NO_SIMD)
+
+#include <wasm_simd128.h>
+
+#define SOFTAES_SIMD128 1
+
+typedef v128_t SoftAesBlock;
+
+#if defined(__wasm_relaxed_simd__)
+#define SOFTAES_SWIZZLE(T, I) wasm_i8x16_relaxed_swizzle((T), (I))
+#else
+#define SOFTAES_SWIZZLE(T, I) wasm_i8x16_swizzle((T), (I))
+#endif
+
+static inline SoftAesBlock softaes_block_zero(void)
+{
+    return wasm_u8x16_const_splat(0);
+}
+
+static inline SoftAesBlock softaes_block_load(const uint8_t in[16])
+{
+    return wasm_v128_load(in);
+}
+
+static inline SoftAesBlock softaes_block_load64x2(const uint64_t a, const uint64_t b)
+{
+    return wasm_u64x2_make(b, a);
+}
+
+static inline void softaes_block_store(uint8_t out[16], const SoftAesBlock in)
+{
+    wasm_v128_store(out, in);
+}
+
+static inline SoftAesBlock softaes_block_xor(const SoftAesBlock a, const SoftAesBlock b)
+{
+    return wasm_v128_xor(a, b);
+}
+
+static inline SoftAesBlock softaes_block_and(const SoftAesBlock a, const SoftAesBlock b)
+{
+    return wasm_v128_and(a, b);
+}
+
+/*
+ * All v128 constants live in linear memory rather than as v128.const: V8
+ * rematerializes each v128.const from immediates (4+ instructions per use)
+ * while a table load is a single instruction. External linkage keeps LLVM
+ * from folding the loads back into constants, which is also why the array
+ * is deliberately not const. It is defined in this header because exactly
+ * one translation unit per library includes it.
+ *
+ * Rows: the vpaes tables, a doubled S-box output pair (sbo2 = xtime(sbo),
+ * which replaces the xtime computation in MixColumns), four
+ * ShiftRows+rotate byte permutations, and splat masks.
+ */
+CRYPTO_ALIGN(64)
+uint8_t hiae_softaes_simd_tables[14][16] = {
+    { 0x00, 0x70, 0x2a, 0x5a, 0x98, 0xe8, 0xb2, 0xc2, 0x08, 0x78, 0x22, 0x52, 0x90, 0xe0, 0xba,
+      0xca }, /* ipt_lo */
+    { 0x00, 0x4d, 0x7c, 0x31, 0x7d, 0x30, 0x01, 0x4c, 0x81, 0xcc, 0xfd, 0xb0, 0xfc, 0xb1, 0x80,
+      0xcd }, /* ipt_hi */
+    { 0x80, 0x01, 0x08, 0x0d, 0x0f, 0x06, 0x05, 0x0e, 0x02, 0x0c, 0x0b, 0x0a, 0x09, 0x03, 0x07,
+      0x04 }, /* inv */
+    { 0x80, 0x07, 0x0b, 0x0f, 0x06, 0x0a, 0x04, 0x01, 0x09, 0x08, 0x05, 0x02, 0x0c, 0x0e, 0x0d,
+      0x03 }, /* inva */
+    { 0x00, 0xc7, 0xbd, 0x6f, 0x17, 0x6d, 0xd2, 0xd0, 0x78, 0xa8, 0x02, 0xc5, 0x7a, 0xbf, 0xaa,
+      0x15 }, /* sbo_u */
+    { 0x00, 0x6a, 0xbb, 0x5f, 0xa5, 0x74, 0xe4, 0xcf, 0xfa, 0x35, 0x2b, 0x41, 0xd1, 0x90, 0x1e,
+      0x8e }, /* sbo_t */
+    { 0x00, 0x95, 0x61, 0xde, 0x2e, 0xda, 0xbf, 0xbb, 0xf0, 0x4b, 0x04, 0x91, 0xf4, 0x65, 0x4f,
+      0x2a }, /* sbo2_u = xtime(sbo_u) */
+    { 0x00, 0xd4, 0x6d, 0xbe, 0x51, 0xe8, 0xd3, 0x85, 0xef, 0x6a, 0x56, 0x82, 0xb9, 0x3b, 0x3c,
+      0x07 }, /* sbo2_t = xtime(sbo_t) */
+    { 0x00, 0x05, 0x0a, 0x0f, 0x04, 0x09, 0x0e, 0x03, 0x08, 0x0d, 0x02, 0x07, 0x0c, 0x01, 0x06,
+      0x0b }, /* ShiftRows */
+    { 0x05, 0x0a, 0x0f, 0x00, 0x09, 0x0e, 0x03, 0x04, 0x0d, 0x02, 0x07, 0x08, 0x01, 0x06, 0x0b,
+      0x0c }, /* ShiftRows + column rotate 1 */
+    { 0x0a, 0x0f, 0x00, 0x05, 0x0e, 0x03, 0x04, 0x09, 0x02, 0x07, 0x08, 0x0d, 0x06, 0x0b, 0x0c,
+      0x01 }, /* ShiftRows + column rotate 2 */
+    { 0x0f, 0x00, 0x05, 0x0a, 0x03, 0x04, 0x09, 0x0e, 0x07, 0x08, 0x0d, 0x02, 0x0b, 0x0c, 0x01,
+      0x06 }, /* ShiftRows + column rotate 3 */
+    { 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f, 0x0f,
+      0x0f }, /* 0x0f splat */
+    { 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x63,
+      0x63 }, /* 0x63 splat (S-box affine constant) */
+};
+
+/* AES round without the S-box affine constant: the returned value is the
+ * true AESL output XOR 0x63 in every byte. Callers that combine two AESL
+ * outputs can skip the constant entirely as it cancels; others add it back
+ * via softaes_block_c63(). */
+static inline SoftAesBlock softaes_block_aesl_nc(const SoftAesBlock x)
+{
+    const v128_t ipt_lo = wasm_v128_load(hiae_softaes_simd_tables[0]);
+    const v128_t ipt_hi = wasm_v128_load(hiae_softaes_simd_tables[1]);
+    const v128_t inv    = wasm_v128_load(hiae_softaes_simd_tables[2]);
+    const v128_t inva   = wasm_v128_load(hiae_softaes_simd_tables[3]);
+    const v128_t sbo_u  = wasm_v128_load(hiae_softaes_simd_tables[4]);
+    const v128_t sbo_t  = wasm_v128_load(hiae_softaes_simd_tables[5]);
+    const v128_t sbo2_u = wasm_v128_load(hiae_softaes_simd_tables[6]);
+    const v128_t sbo2_t = wasm_v128_load(hiae_softaes_simd_tables[7]);
+    const v128_t mc0    = wasm_v128_load(hiae_softaes_simd_tables[8]);
+    const v128_t mc1    = wasm_v128_load(hiae_softaes_simd_tables[9]);
+    const v128_t mc2    = wasm_v128_load(hiae_softaes_simd_tables[10]);
+    const v128_t mc3    = wasm_v128_load(hiae_softaes_simd_tables[11]);
+    const v128_t s0f    = wasm_v128_load(hiae_softaes_simd_tables[12]);
+
+    /* to tower basis; 16-bit shifts keep V8 from materializing byte-shift
+     * masks, the 0x0f mask makes them byte-exact */
+    const v128_t lo = wasm_v128_and(x, s0f);
+    const v128_t hi = wasm_v128_and(wasm_u16x8_shr(x, 4), s0f);
+    const v128_t t  = wasm_v128_xor(SOFTAES_SWIZZLE(ipt_lo, lo), SOFTAES_SWIZZLE(ipt_hi, hi));
+
+    /* GF(16)^2 inversion */
+    const v128_t k   = wasm_v128_and(t, s0f);
+    const v128_t i   = wasm_v128_and(wasm_u16x8_shr(t, 4), s0f);
+    const v128_t j   = wasm_v128_xor(k, i);
+    const v128_t ak  = SOFTAES_SWIZZLE(inva, k);
+    const v128_t iak = wasm_v128_xor(SOFTAES_SWIZZLE(inv, i), ak);
+    const v128_t jak = wasm_v128_xor(SOFTAES_SWIZZLE(inv, j), ak);
+    const v128_t io  = wasm_v128_xor(SOFTAES_SWIZZLE(inv, iak), j);
+    const v128_t jo  = wasm_v128_xor(SOFTAES_SWIZZLE(inv, jak), i);
+
+    /* SubBytes output a and its double a2, standard basis, affine constant
+     * omitted (a uniform 0x63 is invariant under ShiftRows+MixColumns, so
+     * the omission propagates as a plain 0x63 XOR on the result) */
+    const v128_t a  = wasm_v128_xor(SOFTAES_SWIZZLE(sbo_u, io), SOFTAES_SWIZZLE(sbo_t, jo));
+    const v128_t a2 = wasm_v128_xor(SOFTAES_SWIZZLE(sbo2_u, io), SOFTAES_SWIZZLE(sbo2_t, jo));
+
+    /* ShiftRows and MixColumns: 2*v ^ 3*rot1(v) ^ rot2(v) ^ rot3(v) with all
+     * byte permutations precomposed into the mc masks */
+    const v128_t m0 = SOFTAES_SWIZZLE(a2, mc0);
+    const v128_t m1 = SOFTAES_SWIZZLE(wasm_v128_xor(a, a2), mc1);
+    const v128_t m2 = SOFTAES_SWIZZLE(a, mc2);
+    const v128_t m3 = SOFTAES_SWIZZLE(a, mc3);
+
+    return wasm_v128_xor(wasm_v128_xor(m0, m1), wasm_v128_xor(m2, m3));
+}
+
+static inline SoftAesBlock softaes_block_c63(void)
+{
+    return wasm_v128_load(hiae_softaes_simd_tables[13]);
+}
+
+static inline SoftAesBlock softaes_block_aesl(const SoftAesBlock x)
+{
+    return wasm_v128_xor(softaes_block_aesl_nc(x), softaes_block_c63());
+}
+
+static inline SoftAesBlock softaes_block_xaesl(const SoftAesBlock block, const SoftAesBlock prk)
+{
+    return softaes_block_aesl(wasm_v128_xor(block, prk));
+}
+
+static inline SoftAesBlock softaes_block_encrypt(const SoftAesBlock block, const SoftAesBlock rk)
+{
+    return wasm_v128_xor(softaes_block_aesl(block), rk);
+}
+
+#else /* scalar implementation */
 
 typedef struct SoftAesBlock {
     uint32_t w0;
@@ -1162,14 +1502,15 @@ static inline SoftAesBlock softaes_block_encrypt(const SoftAesBlock block, const
     return out;
 }
 
+#endif /* __wasm_simd128__ && !SOFTAES_NO_SIMD */
+
 /* =====================================================
  * HiAE_software.c - hiae_software implementation
  * =====================================================
  */
 
 // Only compile software implementation if hardware AES+VAES+AVX512 is not available
-#if !((defined(__AES__) && defined(__VAES__) && defined(__AVX512F__)) || \
-      defined(__ARM_FEATURE_CRYPTO))
+#ifndef HIAE_HAS_HW_AES
 
 #define FAVOR_PERFORMANCE
 
@@ -1182,14 +1523,40 @@ typedef SoftAesBlock hiae_software_DATA128b;
 #define hiae_software_AESL(x) softaes_block_aesl(x)
 #define hiae_software_XAESL(x, y) softaes_block_xaesl(x, y)
 
+/*
+ * hiae_software_AESL without the S-box affine constant.
+ *
+ * When two hiae_software_AESL outputs are XORed  together the 0x63 constants cancel.
+ */
+#ifdef SOFTAES_SIMD128
+#define hiae_software_AESL_NC(x) softaes_block_aesl_nc(x)
+#define hiae_software_XAESL_NC(x, y) softaes_block_aesl_nc(softaes_block_xor((x), (y)))
+#define hiae_software_AESL_C63() softaes_block_c63()
+#else
+#define hiae_software_AESL_NC(x) hiae_software_AESL(x)
+#define hiae_software_XAESL_NC(x, y) hiae_software_XAESL(x, y)
+#define hiae_software_AESL_C63() hiae_software_SIMD_ZERO_128()
+#endif
+
+/*
+ * On the SIMD backend the bulk functions stay out of line so the state
+ * array lives in memory: engines with 16 vector registers would otherwise
+ * spill it through the stack on every step.
+ */
+#ifdef SOFTAES_SIMD128
+#define SOFTAES_CHUNK_FN static void __attribute__((noinline))
+#else
+#define SOFTAES_CHUNK_FN static inline void
+#endif
+
 static inline void hiae_software_update_state_offset(hiae_software_DATA128b *state,
-                                                     hiae_software_DATA128b *tmp,
                                                      hiae_software_DATA128b M, int offset)
 {
-    tmp[offset] = hiae_software_XAESL(state[(P_0 + offset) % STATE], state[(P_1 + offset) % STATE]);
-    tmp[offset] = hiae_software_SIMD_XOR(tmp[offset], M);
+    hiae_software_DATA128b t =
+        hiae_software_XAESL_NC(state[(P_0 + offset) % STATE], state[(P_1 + offset) % STATE]);
+    t = hiae_software_SIMD_XOR(t, M);
     state[(0 + offset) % STATE] =
-        hiae_software_SIMD_XOR(tmp[offset], hiae_software_AESL(state[(P_4 + offset) % STATE]));
+        hiae_software_SIMD_XOR(t, hiae_software_AESL_NC(state[(P_4 + offset) % STATE]));
     state[(I_1 + offset) % STATE] = hiae_software_SIMD_XOR(state[(I_1 + offset) % STATE], M);
     state[(I_2 + offset) % STATE] = hiae_software_SIMD_XOR(state[(I_2 + offset) % STATE], M);
 }
@@ -1207,40 +1574,42 @@ static inline hiae_software_DATA128b hiae_software_enc_offset(hiae_software_DATA
                                                               hiae_software_DATA128b M, int offset)
 {
     hiae_software_DATA128b C =
-        hiae_software_XAESL(state[(P_0 + offset) % STATE], state[(P_1 + offset) % STATE]);
+        hiae_software_XAESL_NC(state[(P_0 + offset) % STATE], state[(P_1 + offset) % STATE]);
     C = hiae_software_SIMD_XOR(C, M);
     state[(0 + offset) % STATE] =
-        hiae_software_SIMD_XOR(C, hiae_software_AESL(state[(P_4 + offset) % STATE]));
-    C                             = hiae_software_SIMD_XOR(C, state[(P_7 + offset) % STATE]);
+        hiae_software_SIMD_XOR(C, hiae_software_AESL_NC(state[(P_4 + offset) % STATE]));
+    C = hiae_software_SIMD_XOR(hiae_software_SIMD_XOR(C, state[(P_7 + offset) % STATE]),
+                               hiae_software_AESL_C63());
     state[(I_1 + offset) % STATE] = hiae_software_SIMD_XOR(state[(I_1 + offset) % STATE], M);
     state[(I_2 + offset) % STATE] = hiae_software_SIMD_XOR(state[(I_2 + offset) % STATE], M);
     return C;
 }
 
 static inline hiae_software_DATA128b hiae_software_dec_offset(hiae_software_DATA128b *state,
-                                                              hiae_software_DATA128b *tmp,
                                                               hiae_software_DATA128b C, int offset)
 {
-    tmp[offset] = hiae_software_XAESL(state[(P_0 + offset) % STATE], state[(P_1 + offset) % STATE]);
-    hiae_software_DATA128b M = hiae_software_SIMD_XOR(state[(P_7 + offset) % STATE], C);
+    hiae_software_DATA128b t =
+        hiae_software_XAESL_NC(state[(P_0 + offset) % STATE], state[(P_1 + offset) % STATE]);
+    hiae_software_DATA128b M = hiae_software_SIMD_XOR(
+        hiae_software_SIMD_XOR(state[(P_7 + offset) % STATE], C), hiae_software_AESL_C63());
     state[(0 + offset) % STATE] =
-        hiae_software_SIMD_XOR(M, hiae_software_AESL(state[(P_4 + offset) % STATE]));
-    M                             = hiae_software_SIMD_XOR(M, tmp[offset]);
+        hiae_software_SIMD_XOR(M, hiae_software_AESL_NC(state[(P_4 + offset) % STATE]));
+    M                             = hiae_software_SIMD_XOR(M, t);
     state[(I_1 + offset) % STATE] = hiae_software_SIMD_XOR(state[(I_1 + offset) % STATE], M);
     state[(I_2 + offset) % STATE] = hiae_software_SIMD_XOR(state[(I_2 + offset) % STATE], M);
     return M;
 }
 
 #define hiae_software_LOAD_1BLOCK_offset_enc(M, offset) \
-    (M) = hiae_software_SIMD_LOAD(mi + i + 0 + BLOCK_SIZE * offset);
+    (M) = hiae_software_SIMD_LOAD(mi + i + BLOCK_SIZE * (offset));
 #define hiae_software_LOAD_1BLOCK_offset_dec(C, offset) \
-    (C) = hiae_software_SIMD_LOAD(ci + i + 0 + BLOCK_SIZE * offset);
+    (C) = hiae_software_SIMD_LOAD(ci + i + BLOCK_SIZE * (offset));
 #define hiae_software_LOAD_1BLOCK_offset_ad(M, offset) \
-    (M) = hiae_software_SIMD_LOAD(ad + i + 0 + BLOCK_SIZE * offset);
+    (M) = hiae_software_SIMD_LOAD(ad + i + BLOCK_SIZE * (offset));
 #define hiae_software_STORE_1BLOCK_offset_enc(C, offset) \
-    hiae_software_SIMD_STORE(ci + i + 0 + BLOCK_SIZE * offset, (C));
+    hiae_software_SIMD_STORE(ci + i + BLOCK_SIZE * (offset), (C));
 #define hiae_software_STORE_1BLOCK_offset_dec(M, offset) \
-    hiae_software_SIMD_STORE(mi + i + 0 + BLOCK_SIZE * offset, (M));
+    hiae_software_SIMD_STORE(mi + i + BLOCK_SIZE * (offset), (M));
 
 static inline void hiae_software_state_shift(hiae_software_DATA128b *state,
                                              hiae_software_DATA128b *tmp)
@@ -1264,173 +1633,334 @@ static inline void hiae_software_state_shift(hiae_software_DATA128b *state,
     state[15] = tmp[0];
 }
 
-static inline void hiae_software_init_update(hiae_software_DATA128b *state,
-                                             hiae_software_DATA128b *tmp, hiae_software_DATA128b c0,
-                                             hiae_software_DATA128b c1)
+SOFTAES_CHUNK_FN
+hiae_software_init_update(hiae_software_DATA128b *state, hiae_software_DATA128b c0,
+                          hiae_software_DATA128b c1)
 {
-    hiae_software_update_state_offset(state, tmp, c0, 0);
-    hiae_software_update_state_offset(state, tmp, c1, 1);
-    hiae_software_update_state_offset(state, tmp, c0, 2);
-    hiae_software_update_state_offset(state, tmp, c1, 3);
-    hiae_software_update_state_offset(state, tmp, c0, 4);
-    hiae_software_update_state_offset(state, tmp, c1, 5);
-    hiae_software_update_state_offset(state, tmp, c0, 6);
-    hiae_software_update_state_offset(state, tmp, c1, 7);
-    hiae_software_update_state_offset(state, tmp, c0, 8);
-    hiae_software_update_state_offset(state, tmp, c1, 9);
-    hiae_software_update_state_offset(state, tmp, c0, 10);
-    hiae_software_update_state_offset(state, tmp, c1, 11);
-    hiae_software_update_state_offset(state, tmp, c0, 12);
-    hiae_software_update_state_offset(state, tmp, c1, 13);
-    hiae_software_update_state_offset(state, tmp, c0, 14);
-    hiae_software_update_state_offset(state, tmp, c1, 15);
+    hiae_software_update_state_offset(state, c0, 0);
+    hiae_software_update_state_offset(state, c1, 1);
+    hiae_software_update_state_offset(state, c0, 2);
+    hiae_software_update_state_offset(state, c1, 3);
+    hiae_software_update_state_offset(state, c0, 4);
+    hiae_software_update_state_offset(state, c1, 5);
+    hiae_software_update_state_offset(state, c0, 6);
+    hiae_software_update_state_offset(state, c1, 7);
+    hiae_software_update_state_offset(state, c0, 8);
+    hiae_software_update_state_offset(state, c1, 9);
+    hiae_software_update_state_offset(state, c0, 10);
+    hiae_software_update_state_offset(state, c1, 11);
+    hiae_software_update_state_offset(state, c0, 12);
+    hiae_software_update_state_offset(state, c1, 13);
+    hiae_software_update_state_offset(state, c0, 14);
+    hiae_software_update_state_offset(state, c1, 15);
 }
 
-static inline void hiae_software_ad_update(hiae_software_DATA128b *state,
-                                           hiae_software_DATA128b *tmp, const uint8_t *ad, size_t i)
+SOFTAES_CHUNK_FN
+hiae_software_ad_update(hiae_software_DATA128b *state, const uint8_t *ad, size_t i)
 {
-    hiae_software_DATA128b M[16];
-    hiae_software_LOAD_1BLOCK_offset_ad(M[0], 0);
-    hiae_software_LOAD_1BLOCK_offset_ad(M[1], 1);
-    hiae_software_LOAD_1BLOCK_offset_ad(M[2], 2);
-    hiae_software_LOAD_1BLOCK_offset_ad(M[3], 3);
-    hiae_software_LOAD_1BLOCK_offset_ad(M[4], 4);
-    hiae_software_LOAD_1BLOCK_offset_ad(M[5], 5);
-    hiae_software_LOAD_1BLOCK_offset_ad(M[6], 6);
-    hiae_software_LOAD_1BLOCK_offset_ad(M[7], 7);
-    hiae_software_LOAD_1BLOCK_offset_ad(M[8], 8);
-    hiae_software_LOAD_1BLOCK_offset_ad(M[9], 9);
-    hiae_software_LOAD_1BLOCK_offset_ad(M[10], 10);
-    hiae_software_LOAD_1BLOCK_offset_ad(M[11], 11);
-    hiae_software_LOAD_1BLOCK_offset_ad(M[12], 12);
-    hiae_software_LOAD_1BLOCK_offset_ad(M[13], 13);
-    hiae_software_LOAD_1BLOCK_offset_ad(M[14], 14);
-    hiae_software_LOAD_1BLOCK_offset_ad(M[15], 15);
-    hiae_software_update_state_offset(state, tmp, M[0], 0);
-    hiae_software_update_state_offset(state, tmp, M[1], 1);
-    hiae_software_update_state_offset(state, tmp, M[2], 2);
-    hiae_software_update_state_offset(state, tmp, M[3], 3);
-    hiae_software_update_state_offset(state, tmp, M[4], 4);
-    hiae_software_update_state_offset(state, tmp, M[5], 5);
-    hiae_software_update_state_offset(state, tmp, M[6], 6);
-    hiae_software_update_state_offset(state, tmp, M[7], 7);
-    hiae_software_update_state_offset(state, tmp, M[8], 8);
-    hiae_software_update_state_offset(state, tmp, M[9], 9);
-    hiae_software_update_state_offset(state, tmp, M[10], 10);
-    hiae_software_update_state_offset(state, tmp, M[11], 11);
-    hiae_software_update_state_offset(state, tmp, M[12], 12);
-    hiae_software_update_state_offset(state, tmp, M[13], 13);
-    hiae_software_update_state_offset(state, tmp, M[14], 14);
-    hiae_software_update_state_offset(state, tmp, M[15], 15);
+    hiae_software_DATA128b M;
+#define AD_STEP(o)                                      \
+    do {                                                \
+        hiae_software_LOAD_1BLOCK_offset_ad(M, o);      \
+        hiae_software_update_state_offset(state, M, o); \
+    } while (0)
+    AD_STEP(0);
+    AD_STEP(1);
+    AD_STEP(2);
+    AD_STEP(3);
+    AD_STEP(4);
+    AD_STEP(5);
+    AD_STEP(6);
+    AD_STEP(7);
+    AD_STEP(8);
+    AD_STEP(9);
+    AD_STEP(10);
+    AD_STEP(11);
+    AD_STEP(12);
+    AD_STEP(13);
+    AD_STEP(14);
+    AD_STEP(15);
+#undef AD_STEP
 }
 
-static inline void hiae_software_encrypt_chunk(hiae_software_DATA128b *state, const uint8_t *mi,
-                                               uint8_t *ci, size_t i)
+/*
+ * Every output column is stored at once and followed by a memory barrier,
+ * or the compiler hoists all sixteen table loads of a round above their XOR
+ * consumers and register-poor targets (wasmtime) spill the lot.
+ *
+ * And we add an empty asm to prevent the vectorizer from using vector lanes.
+ */
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__BYTE_ORDER__) && \
+    __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ && !defined(SOFTAES_SIMD128)
+
+#define TT_COL(xb, i0, i1, i2, i3) \
+    (LUT0[(xb)[i0]] ^ LUT1[(xb)[i1]] ^ LUT2[(xb)[i2]] ^ LUT3[(xb)[i3]])
+#define TT_BARRIER() __asm__ __volatile__("" ::: "memory")
+
+#define TT_ENC_STEP(o)                                                  \
+    do {                                                                \
+        uint32_t       *S0   = w + (o) * 4;                             \
+        const uint32_t *S2   = w + ((((o) + 2) & 15) * 4);              \
+        uint32_t       *S3   = w + ((((o) + 3) & 15) * 4);              \
+        const uint32_t *S9   = w + ((((o) + 9) & 15) * 4);              \
+        uint32_t       *S13  = w + ((((o) + 13) & 15) * 4);             \
+        const uint8_t  *s13b = (const uint8_t *) S13;                   \
+        uint32_t       *pn   = psc + (((o) + 1) & 1) * 4;               \
+        const uint8_t  *pb   = (const uint8_t *) (psc + ((o) & 1) * 4); \
+        uint32_t        x0, x1, x2, x3, n0, n1, n2, n3, a;              \
+        n0    = S2[0];                                                  \
+        n1    = S2[1];                                                  \
+        n2    = S2[2];                                                  \
+        n3    = S2[3];                                                  \
+        pn[0] = cc0 ^ n0;                                               \
+        pn[1] = cc1 ^ n1;                                               \
+        pn[2] = cc2 ^ n2;                                               \
+        pn[3] = cc3 ^ n3;                                               \
+        __asm__("" : "+r"(pb));                                         \
+        x0 = LOAD32_LE(mi + (o) * 16);                                  \
+        x1 = LOAD32_LE(mi + (o) * 16 + 4);                              \
+        x2 = LOAD32_LE(mi + (o) * 16 + 8);                              \
+        x3 = LOAD32_LE(mi + (o) * 16 + 12);                             \
+        __asm__("" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3));           \
+        a = x0 ^ TT_COL(pb, 0, 5, 10, 15);                              \
+        STORE32_LE(ci + (o) * 16, a ^ S9[0]);                           \
+        TT_BARRIER();                                                   \
+        S0[0] = a ^ TT_COL(s13b, 0, 5, 10, 15);                         \
+        TT_BARRIER();                                                   \
+        a = x1 ^ TT_COL(pb, 4, 9, 14, 3);                               \
+        STORE32_LE(ci + (o) * 16 + 4, a ^ S9[1]);                       \
+        TT_BARRIER();                                                   \
+        S0[1] = a ^ TT_COL(s13b, 4, 9, 14, 3);                          \
+        TT_BARRIER();                                                   \
+        a = x2 ^ TT_COL(pb, 8, 13, 2, 7);                               \
+        STORE32_LE(ci + (o) * 16 + 8, a ^ S9[2]);                       \
+        TT_BARRIER();                                                   \
+        S0[2] = a ^ TT_COL(s13b, 8, 13, 2, 7);                          \
+        TT_BARRIER();                                                   \
+        a = x3 ^ TT_COL(pb, 12, 1, 6, 11);                              \
+        STORE32_LE(ci + (o) * 16 + 12, a ^ S9[3]);                      \
+        TT_BARRIER();                                                   \
+        S0[3] = a ^ TT_COL(s13b, 12, 1, 6, 11);                         \
+        TT_BARRIER();                                                   \
+        S3[0] ^= x0;                                                    \
+        S3[1] ^= x1;                                                    \
+        S3[2] ^= x2;                                                    \
+        S3[3] ^= x3;                                                    \
+        TT_BARRIER();                                                   \
+        S13[0] ^= x0;                                                   \
+        S13[1] ^= x1;                                                   \
+        S13[2] ^= x2;                                                   \
+        S13[3] ^= x3;                                                   \
+        TT_BARRIER();                                                   \
+        cc0 = n0;                                                       \
+        cc1 = n1;                                                       \
+        cc2 = n2;                                                       \
+        cc3 = n3;                                                       \
+    } while (0)
+
+#define TT_LAYOUT_ASSERT()                                                                       \
+    (void) sizeof(                                                                               \
+        char[(sizeof(hiae_software_DATA128b) == 16 && sizeof(hiae_software_DATA128b[16]) == 256) \
+                 ? 1                                                                             \
+                 : -1])
+
+static void
+    __attribute__((noinline)) encrypt_chunk_ttab(uint32_t *w, const uint8_t *mi, uint8_t *ci)
 {
-    hiae_software_DATA128b M[16], C[16];
-    hiae_software_LOAD_1BLOCK_offset_enc(M[0], 0);
-    hiae_software_LOAD_1BLOCK_offset_enc(M[1], 1);
-    hiae_software_LOAD_1BLOCK_offset_enc(M[2], 2);
-    hiae_software_LOAD_1BLOCK_offset_enc(M[3], 3);
-    hiae_software_LOAD_1BLOCK_offset_enc(M[4], 4);
-    hiae_software_LOAD_1BLOCK_offset_enc(M[5], 5);
-    hiae_software_LOAD_1BLOCK_offset_enc(M[6], 6);
-    hiae_software_LOAD_1BLOCK_offset_enc(M[7], 7);
-    hiae_software_LOAD_1BLOCK_offset_enc(M[8], 8);
-    hiae_software_LOAD_1BLOCK_offset_enc(M[9], 9);
-    hiae_software_LOAD_1BLOCK_offset_enc(M[10], 10);
-    hiae_software_LOAD_1BLOCK_offset_enc(M[11], 11);
-    hiae_software_LOAD_1BLOCK_offset_enc(M[12], 12);
-    hiae_software_LOAD_1BLOCK_offset_enc(M[13], 13);
-    hiae_software_LOAD_1BLOCK_offset_enc(M[14], 14);
-    hiae_software_LOAD_1BLOCK_offset_enc(M[15], 15);
-    C[0]  = hiae_software_enc_offset(state, M[0], 0);
-    C[1]  = hiae_software_enc_offset(state, M[1], 1);
-    C[2]  = hiae_software_enc_offset(state, M[2], 2);
-    C[3]  = hiae_software_enc_offset(state, M[3], 3);
-    C[4]  = hiae_software_enc_offset(state, M[4], 4);
-    C[5]  = hiae_software_enc_offset(state, M[5], 5);
-    C[6]  = hiae_software_enc_offset(state, M[6], 6);
-    C[7]  = hiae_software_enc_offset(state, M[7], 7);
-    C[8]  = hiae_software_enc_offset(state, M[8], 8);
-    C[9]  = hiae_software_enc_offset(state, M[9], 9);
-    C[10] = hiae_software_enc_offset(state, M[10], 10);
-    C[11] = hiae_software_enc_offset(state, M[11], 11);
-    C[12] = hiae_software_enc_offset(state, M[12], 12);
-    C[13] = hiae_software_enc_offset(state, M[13], 13);
-    C[14] = hiae_software_enc_offset(state, M[14], 14);
-    C[15] = hiae_software_enc_offset(state, M[15], 15);
-    hiae_software_STORE_1BLOCK_offset_enc(C[0], 0);
-    hiae_software_STORE_1BLOCK_offset_enc(C[1], 1);
-    hiae_software_STORE_1BLOCK_offset_enc(C[2], 2);
-    hiae_software_STORE_1BLOCK_offset_enc(C[3], 3);
-    hiae_software_STORE_1BLOCK_offset_enc(C[4], 4);
-    hiae_software_STORE_1BLOCK_offset_enc(C[5], 5);
-    hiae_software_STORE_1BLOCK_offset_enc(C[6], 6);
-    hiae_software_STORE_1BLOCK_offset_enc(C[7], 7);
-    hiae_software_STORE_1BLOCK_offset_enc(C[8], 8);
-    hiae_software_STORE_1BLOCK_offset_enc(C[9], 9);
-    hiae_software_STORE_1BLOCK_offset_enc(C[10], 10);
-    hiae_software_STORE_1BLOCK_offset_enc(C[11], 11);
-    hiae_software_STORE_1BLOCK_offset_enc(C[12], 12);
-    hiae_software_STORE_1BLOCK_offset_enc(C[13], 13);
-    hiae_software_STORE_1BLOCK_offset_enc(C[14], 14);
-    hiae_software_STORE_1BLOCK_offset_enc(C[15], 15);
+    uint32_t psc[8];
+    uint32_t cc0 = w[4], cc1 = w[5], cc2 = w[6], cc3 = w[7];
+
+    TT_LAYOUT_ASSERT();
+
+    psc[0] = w[0] ^ w[4];
+    psc[1] = w[1] ^ w[5];
+    psc[2] = w[2] ^ w[6];
+    psc[3] = w[3] ^ w[7];
+
+    TT_ENC_STEP(0);
+    TT_ENC_STEP(1);
+    TT_ENC_STEP(2);
+    TT_ENC_STEP(3);
+    TT_ENC_STEP(4);
+    TT_ENC_STEP(5);
+    TT_ENC_STEP(6);
+    TT_ENC_STEP(7);
+    TT_ENC_STEP(8);
+    TT_ENC_STEP(9);
+    TT_ENC_STEP(10);
+    TT_ENC_STEP(11);
+    TT_ENC_STEP(12);
+    TT_ENC_STEP(13);
+    TT_ENC_STEP(14);
+    TT_ENC_STEP(15);
 }
 
-static inline void hiae_software_decrypt_chunk(hiae_software_DATA128b *state,
-                                               hiae_software_DATA128b *tmp, const uint8_t *ci,
-                                               uint8_t *mi, size_t i)
+#define TT_DEC_STEP(o)                                                  \
+    do {                                                                \
+        uint32_t       *S0   = w + (o) * 4;                             \
+        const uint32_t *S2   = w + ((((o) + 2) & 15) * 4);              \
+        uint32_t       *S3   = w + ((((o) + 3) & 15) * 4);              \
+        const uint32_t *S9   = w + ((((o) + 9) & 15) * 4);              \
+        uint32_t       *S13  = w + ((((o) + 13) & 15) * 4);             \
+        const uint8_t  *s13b = (const uint8_t *) S13;                   \
+        uint32_t       *pn   = psc + (((o) + 1) & 1) * 4;               \
+        const uint8_t  *pb   = (const uint8_t *) (psc + ((o) & 1) * 4); \
+        uint32_t        t0, t1, t2, t3, m0, m1, m2, m3;                 \
+        uint32_t        n0, n1, n2, n3;                                 \
+        n0    = S2[0];                                                  \
+        n1    = S2[1];                                                  \
+        n2    = S2[2];                                                  \
+        n3    = S2[3];                                                  \
+        pn[0] = cc0 ^ n0;                                               \
+        pn[1] = cc1 ^ n1;                                               \
+        pn[2] = cc2 ^ n2;                                               \
+        pn[3] = cc3 ^ n3;                                               \
+        __asm__("" : "+r"(pb));                                         \
+        t0 = LOAD32_LE(ci + (o) * 16) ^ S9[0];                          \
+        t1 = LOAD32_LE(ci + (o) * 16 + 4) ^ S9[1];                      \
+        t2 = LOAD32_LE(ci + (o) * 16 + 8) ^ S9[2];                      \
+        t3 = LOAD32_LE(ci + (o) * 16 + 12) ^ S9[3];                     \
+        m0 = t0 ^ TT_COL(pb, 0, 5, 10, 15);                             \
+        TT_BARRIER();                                                   \
+        m1 = t1 ^ TT_COL(pb, 4, 9, 14, 3);                              \
+        TT_BARRIER();                                                   \
+        m2 = t2 ^ TT_COL(pb, 8, 13, 2, 7);                              \
+        TT_BARRIER();                                                   \
+        m3 = t3 ^ TT_COL(pb, 12, 1, 6, 11);                             \
+        TT_BARRIER();                                                   \
+        STORE32_LE(mi + (o) * 16, m0);                                  \
+        STORE32_LE(mi + (o) * 16 + 4, m1);                              \
+        STORE32_LE(mi + (o) * 16 + 8, m2);                              \
+        STORE32_LE(mi + (o) * 16 + 12, m3);                             \
+        S0[0] = t0 ^ TT_COL(s13b, 0, 5, 10, 15);                        \
+        TT_BARRIER();                                                   \
+        S0[1] = t1 ^ TT_COL(s13b, 4, 9, 14, 3);                         \
+        TT_BARRIER();                                                   \
+        S0[2] = t2 ^ TT_COL(s13b, 8, 13, 2, 7);                         \
+        TT_BARRIER();                                                   \
+        S0[3] = t3 ^ TT_COL(s13b, 12, 1, 6, 11);                        \
+        TT_BARRIER();                                                   \
+        S3[0] ^= m0;                                                    \
+        S3[1] ^= m1;                                                    \
+        S3[2] ^= m2;                                                    \
+        S3[3] ^= m3;                                                    \
+        S13[0] ^= m0;                                                   \
+        S13[1] ^= m1;                                                   \
+        S13[2] ^= m2;                                                   \
+        S13[3] ^= m3;                                                   \
+        cc0 = n0;                                                       \
+        cc1 = n1;                                                       \
+        cc2 = n2;                                                       \
+        cc3 = n3;                                                       \
+    } while (0)
+
+static void
+    __attribute__((noinline)) decrypt_chunk_ttab(uint32_t *w, const uint8_t *ci, uint8_t *mi)
 {
-    hiae_software_DATA128b M[16], C[16];
-    hiae_software_LOAD_1BLOCK_offset_dec(C[0], 0);
-    hiae_software_LOAD_1BLOCK_offset_dec(C[1], 1);
-    hiae_software_LOAD_1BLOCK_offset_dec(C[2], 2);
-    hiae_software_LOAD_1BLOCK_offset_dec(C[3], 3);
-    hiae_software_LOAD_1BLOCK_offset_dec(C[4], 4);
-    hiae_software_LOAD_1BLOCK_offset_dec(C[5], 5);
-    hiae_software_LOAD_1BLOCK_offset_dec(C[6], 6);
-    hiae_software_LOAD_1BLOCK_offset_dec(C[7], 7);
-    hiae_software_LOAD_1BLOCK_offset_dec(C[8], 8);
-    hiae_software_LOAD_1BLOCK_offset_dec(C[9], 9);
-    hiae_software_LOAD_1BLOCK_offset_dec(C[10], 10);
-    hiae_software_LOAD_1BLOCK_offset_dec(C[11], 11);
-    hiae_software_LOAD_1BLOCK_offset_dec(C[12], 12);
-    hiae_software_LOAD_1BLOCK_offset_dec(C[13], 13);
-    hiae_software_LOAD_1BLOCK_offset_dec(C[14], 14);
-    hiae_software_LOAD_1BLOCK_offset_dec(C[15], 15);
-    M[0]  = hiae_software_dec_offset(state, tmp, C[0], 0);
-    M[1]  = hiae_software_dec_offset(state, tmp, C[1], 1);
-    M[2]  = hiae_software_dec_offset(state, tmp, C[2], 2);
-    M[3]  = hiae_software_dec_offset(state, tmp, C[3], 3);
-    M[4]  = hiae_software_dec_offset(state, tmp, C[4], 4);
-    M[5]  = hiae_software_dec_offset(state, tmp, C[5], 5);
-    M[6]  = hiae_software_dec_offset(state, tmp, C[6], 6);
-    M[7]  = hiae_software_dec_offset(state, tmp, C[7], 7);
-    M[8]  = hiae_software_dec_offset(state, tmp, C[8], 8);
-    M[9]  = hiae_software_dec_offset(state, tmp, C[9], 9);
-    M[10] = hiae_software_dec_offset(state, tmp, C[10], 10);
-    M[11] = hiae_software_dec_offset(state, tmp, C[11], 11);
-    M[12] = hiae_software_dec_offset(state, tmp, C[12], 12);
-    M[13] = hiae_software_dec_offset(state, tmp, C[13], 13);
-    M[14] = hiae_software_dec_offset(state, tmp, C[14], 14);
-    M[15] = hiae_software_dec_offset(state, tmp, C[15], 15);
-    hiae_software_STORE_1BLOCK_offset_dec(M[0], 0);
-    hiae_software_STORE_1BLOCK_offset_dec(M[1], 1);
-    hiae_software_STORE_1BLOCK_offset_dec(M[2], 2);
-    hiae_software_STORE_1BLOCK_offset_dec(M[3], 3);
-    hiae_software_STORE_1BLOCK_offset_dec(M[4], 4);
-    hiae_software_STORE_1BLOCK_offset_dec(M[5], 5);
-    hiae_software_STORE_1BLOCK_offset_dec(M[6], 6);
-    hiae_software_STORE_1BLOCK_offset_dec(M[7], 7);
-    hiae_software_STORE_1BLOCK_offset_dec(M[8], 8);
-    hiae_software_STORE_1BLOCK_offset_dec(M[9], 9);
-    hiae_software_STORE_1BLOCK_offset_dec(M[10], 10);
-    hiae_software_STORE_1BLOCK_offset_dec(M[11], 11);
-    hiae_software_STORE_1BLOCK_offset_dec(M[12], 12);
-    hiae_software_STORE_1BLOCK_offset_dec(M[13], 13);
-    hiae_software_STORE_1BLOCK_offset_dec(M[14], 14);
-    hiae_software_STORE_1BLOCK_offset_dec(M[15], 15);
+    uint32_t psc[8];
+    uint32_t cc0 = w[4], cc1 = w[5], cc2 = w[6], cc3 = w[7];
+
+    TT_LAYOUT_ASSERT();
+
+    psc[0] = w[0] ^ w[4];
+    psc[1] = w[1] ^ w[5];
+    psc[2] = w[2] ^ w[6];
+    psc[3] = w[3] ^ w[7];
+
+    TT_DEC_STEP(0);
+    TT_DEC_STEP(1);
+    TT_DEC_STEP(2);
+    TT_DEC_STEP(3);
+    TT_DEC_STEP(4);
+    TT_DEC_STEP(5);
+    TT_DEC_STEP(6);
+    TT_DEC_STEP(7);
+    TT_DEC_STEP(8);
+    TT_DEC_STEP(9);
+    TT_DEC_STEP(10);
+    TT_DEC_STEP(11);
+    TT_DEC_STEP(12);
+    TT_DEC_STEP(13);
+    TT_DEC_STEP(14);
+    TT_DEC_STEP(15);
+}
+
+#undef TT_ENC_STEP
+#undef TT_DEC_STEP
+#undef TT_COL
+#undef TT_BARRIER
+#undef TT_LAYOUT_ASSERT
+
+#define HIAE_TTAB_CHUNKS 1
+#endif
+
+SOFTAES_CHUNK_FN
+hiae_software_encrypt_chunk(hiae_software_DATA128b *state, const uint8_t *mi, uint8_t *ci, size_t i)
+{
+#ifdef HIAE_TTAB_CHUNKS
+    encrypt_chunk_ttab((uint32_t *) (void *) state, mi + i, ci + i);
+#else
+    /* one block at a time keeps the number of live vectors small, which
+     * engines with 16 vector registers reward far more than load batching */
+    hiae_software_DATA128b M, C;
+#define ENC_STEP(o)                                  \
+    do {                                             \
+        hiae_software_LOAD_1BLOCK_offset_enc(M, o);  \
+        C = hiae_software_enc_offset(state, M, o);   \
+        hiae_software_STORE_1BLOCK_offset_enc(C, o); \
+    } while (0)
+    ENC_STEP(0);
+    ENC_STEP(1);
+    ENC_STEP(2);
+    ENC_STEP(3);
+    ENC_STEP(4);
+    ENC_STEP(5);
+    ENC_STEP(6);
+    ENC_STEP(7);
+    ENC_STEP(8);
+    ENC_STEP(9);
+    ENC_STEP(10);
+    ENC_STEP(11);
+    ENC_STEP(12);
+    ENC_STEP(13);
+    ENC_STEP(14);
+    ENC_STEP(15);
+#undef ENC_STEP
+#endif
+}
+
+SOFTAES_CHUNK_FN
+hiae_software_decrypt_chunk(hiae_software_DATA128b *state, const uint8_t *ci, uint8_t *mi, size_t i)
+{
+#ifdef HIAE_TTAB_CHUNKS
+    decrypt_chunk_ttab((uint32_t *) (void *) state, ci + i, mi + i);
+#else
+    /* same single-block structure as encrypt_chunk, for the same reason */
+    hiae_software_DATA128b M, C;
+#define DEC_STEP(o)                                  \
+    do {                                             \
+        hiae_software_LOAD_1BLOCK_offset_dec(C, o);  \
+        M = hiae_software_dec_offset(state, C, o);   \
+        hiae_software_STORE_1BLOCK_offset_dec(M, o); \
+    } while (0)
+    DEC_STEP(0);
+    DEC_STEP(1);
+    DEC_STEP(2);
+    DEC_STEP(3);
+    DEC_STEP(4);
+    DEC_STEP(5);
+    DEC_STEP(6);
+    DEC_STEP(7);
+    DEC_STEP(8);
+    DEC_STEP(9);
+    DEC_STEP(10);
+    DEC_STEP(11);
+    DEC_STEP(12);
+    DEC_STEP(13);
+    DEC_STEP(14);
+    DEC_STEP(15);
+#undef DEC_STEP
+#endif
 }
 
 static void HiAE_init_software(HiAE_state_t *state_opaque, const uint8_t *key, const uint8_t *nonce)
@@ -1461,9 +1991,8 @@ static void HiAE_init_software(HiAE_state_t *state_opaque, const uint8_t *key, c
     state[14]                 = ze;
     state[15]                 = hiae_software_SIMD_XOR(c0, c1);
 
-    hiae_software_DATA128b tmp[STATE];
-    hiae_software_init_update(state, tmp, k0, k1);
-    hiae_software_init_update(state, tmp, k0, k1);
+    hiae_software_init_update(state, k0, k1);
+    hiae_software_init_update(state, k0, k1);
 
     memcpy(state_opaque->opaque, state, sizeof(state));
 }
@@ -1480,14 +2009,14 @@ static void HiAE_absorb_software(HiAE_state_t *state_opaque, const uint8_t *ad, 
         return;
 
     for (; i < prefix; i += UNROLL_BLOCK_SIZE) {
-        hiae_software_ad_update(state, tmp, ad, i);
+        hiae_software_ad_update(state, ad, i);
     }
 
     size_t pad = len % BLOCK_SIZE;
     len -= pad;
     for (; i < len; i += BLOCK_SIZE) {
         M[0] = hiae_software_SIMD_LOAD(ad + i);
-        hiae_software_update_state_offset(state, tmp, M[0], 0);
+        hiae_software_update_state_offset(state, M[0], 0);
         hiae_software_state_shift(state, tmp);
     }
     if (pad != 0) {
@@ -1495,7 +2024,7 @@ static void HiAE_absorb_software(HiAE_state_t *state_opaque, const uint8_t *ad, 
         memset(buf, 0x00, sizeof(buf));
         memcpy(buf, ad + len, pad);
         M[0] = hiae_software_SIMD_LOAD(buf);
-        hiae_software_update_state_offset(state, tmp, M[0], 0);
+        hiae_software_update_state_offset(state, M[0], 0);
         hiae_software_state_shift(state, tmp);
     }
     memcpy(state_opaque->opaque, state, sizeof(state));
@@ -1510,10 +2039,10 @@ static void HiAE_finalize_software(HiAE_state_t *state_opaque, uint64_t ad_len, 
     uint64_t lens[2];
     lens[0] = ad_len * 8;
     lens[1] = msg_len * 8;
-    hiae_software_DATA128b temp, tmp[STATE];
+    hiae_software_DATA128b temp;
     temp = hiae_software_SIMD_LOAD((uint8_t *) lens);
-    hiae_software_init_update(state, tmp, temp, temp);
-    hiae_software_init_update(state, tmp, temp, temp);
+    hiae_software_init_update(state, temp, temp);
+    hiae_software_init_update(state, temp, temp);
     temp = state[0];
     for (size_t i = 1; i < STATE; ++i) {
         temp = hiae_software_SIMD_XOR(temp, state[i]);
@@ -1570,7 +2099,7 @@ static void HiAE_dec_software(HiAE_state_t *state_opaque, uint8_t *mi, const uin
     hiae_software_DATA128b M[STATE], C[STATE], tmp[STATE];
 
     for (size_t i = 0; i < prefix; i += UNROLL_BLOCK_SIZE) {
-        hiae_software_decrypt_chunk(state, tmp, ci, mi, i);
+        hiae_software_decrypt_chunk(state, ci, mi, i);
     }
 
     size_t pad = rest % BLOCK_SIZE;
@@ -1578,7 +2107,7 @@ static void HiAE_dec_software(HiAE_state_t *state_opaque, uint8_t *mi, const uin
 
     for (size_t i = 0; i < rest; i += BLOCK_SIZE) {
         C[0] = hiae_software_SIMD_LOAD(ci + i + prefix);
-        M[0] = hiae_software_dec_offset(state, tmp, C[0], 0);
+        M[0] = hiae_software_dec_offset(state, C[0], 0);
         hiae_software_state_shift(state, tmp);
         hiae_software_SIMD_STORE(mi + i + prefix, M[0]);
     }
@@ -1592,7 +2121,7 @@ static void HiAE_dec_software(HiAE_state_t *state_opaque, uint8_t *mi, const uin
         M[0] = hiae_software_SIMD_LOAD(mask);
         C[0] = hiae_software_keystream_block(state, C[0], 0);
         C[0] = hiae_software_SIMD_AND(C[0], M[0]);
-        hiae_software_update_state_offset(state, tmp, C[0], 0);
+        hiae_software_update_state_offset(state, C[0], 0);
         hiae_software_state_shift(state, tmp);
         hiae_software_SIMD_STORE(buf, C[0]);
         memcpy(mi + rest + prefix, buf, pad);
@@ -1648,6 +2177,16 @@ static void HiAE_dec_partial_noupdate_software(HiAE_state_t  *state_opaque,
     memcpy(mi, buf, size);
 }
 
+static int HiAE_verify_software(HiAE_state_t *state, uint64_t ad_len, uint64_t msg_len,
+                                const uint8_t *tag)
+{
+    uint8_t computed_tag[HIAE_MACBYTES];
+
+    HiAE_finalize_software(state, ad_len, msg_len, computed_tag);
+
+    return hiae_constant_time_compare(computed_tag, tag, HIAE_MACBYTES);
+}
+
 static int HiAE_encrypt_software(const uint8_t *key,
                                  const uint8_t *nonce,
                                  const uint8_t *msg,
@@ -1700,6 +2239,7 @@ const HiAE_impl_t hiae_software_impl = { .name                 = "Software",
                                          .init                 = HiAE_init_software,
                                          .absorb               = HiAE_absorb_software,
                                          .finalize             = HiAE_finalize_software,
+                                         .verify               = HiAE_verify_software,
                                          .enc                  = HiAE_enc_software,
                                          .dec                  = HiAE_dec_software,
                                          .enc_partial_noupdate = HiAE_enc_partial_noupdate_software,
@@ -1708,7 +2248,7 @@ const HiAE_impl_t hiae_software_impl = { .name                 = "Software",
                                          .decrypt              = HiAE_decrypt_software,
                                          .mac                  = HiAE_mac_software };
 
-#endif // !defined(__AES__) && !defined(__ARM_FEATURE_CRYPTO)
+#endif /* !HIAE_HAS_HW_AES */
 
 /* End of HiAE_software.c */
 
@@ -2249,6 +2789,16 @@ static void HiAE_dec_partial_noupdate_aesni(HiAE_state_t  *state_opaque,
     memcpy(mi, buf, size);
 }
 
+static int HiAE_verify_aesni(HiAE_state_t *state, uint64_t ad_len, uint64_t msg_len,
+                             const uint8_t *tag)
+{
+    uint8_t computed_tag[HIAE_MACBYTES];
+
+    HiAE_finalize_aesni(state, ad_len, msg_len, computed_tag);
+
+    return hiae_constant_time_compare(computed_tag, tag, HIAE_MACBYTES);
+}
+
 static int HiAE_encrypt_aesni(const uint8_t *key,
                               const uint8_t *nonce,
                               const uint8_t *msg,
@@ -2301,6 +2851,7 @@ const HiAE_impl_t hiae_aesni_impl = { .name                 = "AES-NI",
                                       .init                 = HiAE_init_aesni,
                                       .absorb               = HiAE_absorb_aesni,
                                       .finalize             = HiAE_finalize_aesni,
+                                      .verify               = HiAE_verify_aesni,
                                       .enc                  = HiAE_enc_aesni,
                                       .dec                  = HiAE_dec_aesni,
                                       .enc_partial_noupdate = HiAE_enc_partial_noupdate_aesni,
@@ -2319,6 +2870,7 @@ const HiAE_impl_t hiae_aesni_impl = { .name                 = NULL,
                                       .init                 = NULL,
                                       .absorb               = NULL,
                                       .finalize             = NULL,
+                                      .verify               = NULL,
                                       .enc                  = NULL,
                                       .dec                  = NULL,
                                       .enc_partial_noupdate = NULL,
@@ -2335,11 +2887,12 @@ const HiAE_impl_t hiae_aesni_impl = { .name                 = NULL,
  * =====================================================
  */
 
+/* clang-cl can build this implementation; MSVC proper cannot (no target pragmas) */
 #if (defined(__i386__) || defined(_M_IX86) || defined(__x86_64__) || defined(_M_AMD64)) && \
-    !defined(_MSC_VER)
+    (!defined(_MSC_VER) || defined(__clang__))
 
 #ifdef __clang__
-#if __clang_major__ >= 18
+#if __clang_major__ >= 18 && __clang_major__ < 22
 #pragma clang attribute push(__attribute__((target("aes,vaes,avx512f,evex512"))), \
                              apply_to = function)
 #else
@@ -2611,7 +3164,7 @@ static void HiAE_absorb_vaes(HiAE_state_t *state_opaque, const uint8_t *ad, size
         "vpxorq %%xmm4, %%xmm23, %%xmm4;"    // S[4] = hiae_vaes_avx512_SIMD_XOR(S[4], M[7])
 
         // round 9
-        "vmovdqa64 128(%1, %%rax), %%xmm16;" // Load M[8] into xmm16
+        "vmovdqu64 128(%1, %%rax), %%xmm16;" // Load M[8] into xmm16
         "vpxorq %%xmm8, %%xmm9, %%xmm24;"    // C[8] = hiae_vaes_avx512_SIMD_XOR(S[8], S[9])
         "vaesenc %%xmm16, %%xmm24, %%xmm24;" // C[8] = hiae_vaes_avx512_AESENC(M[8], C[8])
         "vaesenc %%xmm24, %%xmm5, %%xmm8;"   // S[24] = hiae_vaes_avx512_AESENC(C[8], S[5])
@@ -2619,7 +3172,7 @@ static void HiAE_absorb_vaes(HiAE_state_t *state_opaque, const uint8_t *ad, size
         "vpxorq %%xmm5, %%xmm16, %%xmm5;"    // S[5] = hiae_vaes_avx512_SIMD_XOR(S[5], M[8])
 
         // round 10
-        "vmovdqa64 144(%1, %%rax), %%xmm17;" // Load M[9] into xmm17
+        "vmovdqu64 144(%1, %%rax), %%xmm17;" // Load M[9] into xmm17
         "vpxorq %%xmm9, %%xmm10, %%xmm25;"   // C[9] = hiae_vaes_avx512_SIMD_XOR(S[9], S[10])
         "vaesenc %%xmm17, %%xmm25, %%xmm25;" // C[9] = hiae_vaes_avx512_AESENC(M[9], C[9])
         "vaesenc %%xmm25, %%xmm6, %%xmm9;"   // S[25] = hiae_vaes_avx512_AESENC(C[9], S[6])
@@ -2627,7 +3180,7 @@ static void HiAE_absorb_vaes(HiAE_state_t *state_opaque, const uint8_t *ad, size
         "vpxorq %%xmm6, %%xmm17, %%xmm6;"    // S[6] = hiae_vaes_avx512_SIMD_XOR(S[6], M[9])
 
         // round 11
-        "vmovdqa64 160(%1, %%rax), %%xmm18;" // Load M[10] into xmm18
+        "vmovdqu64 160(%1, %%rax), %%xmm18;" // Load M[10] into xmm18
         "vpxorq %%xmm10, %%xmm11, %%xmm26;"  // C[10] = hiae_vaes_avx512_SIMD_XOR(S[10], S[11])
         "vaesenc %%xmm18, %%xmm26, %%xmm26;" // C[10] = hiae_vaes_avx512_AESENC(M[10], C[10])
         "vaesenc %%xmm26, %%xmm7, %%xmm10;"  // S[26] = hiae_vaes_avx512_AESENC(C[10], S[7])
@@ -2635,7 +3188,7 @@ static void HiAE_absorb_vaes(HiAE_state_t *state_opaque, const uint8_t *ad, size
         "vpxorq %%xmm7, %%xmm18, %%xmm7;"    // S[7] = hiae_vaes_avx512_SIMD_XOR(S[7], M[10])
 
         // round 12
-        "vmovdqa64 176(%1, %%rax), %%xmm19;" // Load M[11] into xmm19
+        "vmovdqu64 176(%1, %%rax), %%xmm19;" // Load M[11] into xmm19
         "vpxorq %%xmm11, %%xmm12, %%xmm27;"  // C[11] = hiae_vaes_avx512_SIMD_XOR(S[11], S[12])
         "vaesenc %%xmm19, %%xmm27, %%xmm27;" // C[11] = hiae_vaes_avx512_AESENC(M[11], C[11])
         "vaesenc %%xmm27, %%xmm8, %%xmm11;"  // S[27] = hiae_vaes_avx512_AESENC(C[11], S[8])
@@ -2643,7 +3196,7 @@ static void HiAE_absorb_vaes(HiAE_state_t *state_opaque, const uint8_t *ad, size
         "vpxorq %%xmm8, %%xmm19, %%xmm8;"    // S[8] = hiae_vaes_avx512_SIMD_XOR(S[8], M[11])
 
         // round 13
-        "vmovdqa64 192(%1, %%rax), %%xmm20;" // Load M[12] into xmm20
+        "vmovdqu64 192(%1, %%rax), %%xmm20;" // Load M[12] into xmm20
         "vpxorq %%xmm12, %%xmm13, %%xmm28;"  // C[12] = hiae_vaes_avx512_SIMD_XOR(S[12], S[13])
         "vaesenc %%xmm20, %%xmm28, %%xmm28;" // C[12] = hiae_vaes_avx512_AESENC(M[12], C[12])
         "vaesenc %%xmm28, %%xmm9, %%xmm12;"  // S[28] = hiae_vaes_avx512_AESENC(C[12], S[9])
@@ -2651,7 +3204,7 @@ static void HiAE_absorb_vaes(HiAE_state_t *state_opaque, const uint8_t *ad, size
         "vpxorq %%xmm9, %%xmm20, %%xmm9;"    // S[9] = hiae_vaes_avx512_SIMD_XOR(S[9], M[12])
 
         // round 14
-        "vmovdqa64 208(%1, %%rax), %%xmm21;" // Load M[13] into xmm21
+        "vmovdqu64 208(%1, %%rax), %%xmm21;" // Load M[13] into xmm21
         "vpxorq %%xmm13, %%xmm14, %%xmm29;"  // C[13] = hiae_vaes_avx512_SIMD_XOR(S[13], S[14])
         "vaesenc %%xmm21, %%xmm29, %%xmm29;" // C[13] = hiae_vaes_avx512_AESENC(M[13], C[13])
         "vaesenc %%xmm29, %%xmm10, %%xmm13;" // S[29] = hiae_vaes_avx512_AESENC(C[13], S[10])
@@ -2659,7 +3212,7 @@ static void HiAE_absorb_vaes(HiAE_state_t *state_opaque, const uint8_t *ad, size
         "vpxorq %%xmm10, %%xmm21, %%xmm10;"  // S[10] = hiae_vaes_avx512_SIMD_XOR(S[10], M[13])
 
         // round 15
-        "vmovdqa64 224(%1, %%rax), %%xmm22;" // Load M[14] into xmm22
+        "vmovdqu64 224(%1, %%rax), %%xmm22;" // Load M[14] into xmm22
         "vpxorq %%xmm14, %%xmm15, %%xmm30;"  // C[14] = hiae_vaes_avx512_SIMD_XOR(S[14], S[15])
         "vaesenc %%xmm22, %%xmm30, %%xmm30;" // C[14] = hiae_vaes_avx512_AESENC(M[14], C[14])
         "vaesenc %%xmm30, %%xmm11, %%xmm14;" // S[30] = hiae_vaes_avx512_AESENC(C[14], S[11])
@@ -2667,7 +3220,7 @@ static void HiAE_absorb_vaes(HiAE_state_t *state_opaque, const uint8_t *ad, size
         "vpxorq %%xmm11, %%xmm22, %%xmm11;"  // S[11] = hiae_vaes_avx512_SIMD_XOR(S[11], M[14])
 
         // round 16
-        "vmovdqa64 240(%1, %%rax), %%xmm23;" // Load M[15] into xmm23
+        "vmovdqu64 240(%1, %%rax), %%xmm23;" // Load M[15] into xmm23
         "vpxorq %%xmm15, %%xmm0, %%xmm31;"   // C[15] = hiae_vaes_avx512_SIMD_XOR(S[15], S[0])
         "vaesenc %%xmm23, %%xmm31, %%xmm31;" // C[15] = hiae_vaes_avx512_AESENC(M[15], C[15])
         "vaesenc %%xmm31, %%xmm12, %%xmm15;" // S[31] = hiae_vaes_avx512_AESENC(C[15], S[12])
@@ -2864,84 +3417,84 @@ static void HiAE_enc_vaes(HiAE_state_t *state_opaque, uint8_t *ci, const uint8_t
         "vmovdqu64 %%xmm31, 112(%0, %%rax);" // Write back C[7] to ci[i+112:i+128]
 
         // round 9
-        "vmovdqa64 128(%1, %%rax), %%xmm16;" // Load M[8] into xmm16
+        "vmovdqu64 128(%1, %%rax), %%xmm16;" // Load M[8] into xmm16
         "vpxorq %%xmm8, %%xmm9, %%xmm24;"    // C[8] = hiae_vaes_avx512_SIMD_XOR(S[8], S[9])
         "vaesenc %%xmm16, %%xmm24, %%xmm24;" // C[8] = hiae_vaes_avx512_AESENC(M[8], C[8])
         "vaesenc %%xmm24, %%xmm5, %%xmm8;"   // S[24] = hiae_vaes_avx512_AESENC(C[8], S[5])
         "vpxorq %%xmm24, %%xmm1, %%xmm24;"   // C[8] = hiae_vaes_avx512_SIMD_XOR(C[8], S[1])
         "vpxorq %%xmm11, %%xmm16, %%xmm11;"  // S[11] = hiae_vaes_avx512_SIMD_XOR(S[11], M[8])
         "vpxorq %%xmm5, %%xmm16, %%xmm5;"    // S[5] = hiae_vaes_avx512_SIMD_XOR(S[5], M[8])
-        "vmovdqa64 %%xmm24, 128(%0, %%rax);" // Write back C[8] to ci[i+128:i+144]
+        "vmovdqu64 %%xmm24, 128(%0, %%rax);" // Write back C[8] to ci[i+128:i+144]
 
         // round 10
-        "vmovdqa64 144(%1, %%rax), %%xmm17;" // Load M[9] into xmm17
+        "vmovdqu64 144(%1, %%rax), %%xmm17;" // Load M[9] into xmm17
         "vpxorq %%xmm9, %%xmm10, %%xmm25;"   // C[9] = hiae_vaes_avx512_SIMD_XOR(S[9], S[10])
         "vaesenc %%xmm17, %%xmm25, %%xmm25;" // C[9] = hiae_vaes_avx512_AESENC(M[9], C[9])
         "vaesenc %%xmm25, %%xmm6, %%xmm9;"   // S[25] = hiae_vaes_avx512_AESENC(C[9], S[6])
         "vpxorq %%xmm25, %%xmm2, %%xmm25;"   // C[9] = hiae_vaes_avx512_SIMD_XOR(C[9], S[2])
         "vpxorq %%xmm12, %%xmm17, %%xmm12;"  // S[12] = hiae_vaes_avx512_SIMD_XOR(S[12], M[9])
         "vpxorq %%xmm6, %%xmm17, %%xmm6;"    // S[6] = hiae_vaes_avx512_SIMD_XOR(S[6], M[9])
-        "vmovdqa64 %%xmm25, 144(%0, %%rax);" // Write back C[9] to ci[i+144:i+160]
+        "vmovdqu64 %%xmm25, 144(%0, %%rax);" // Write back C[9] to ci[i+144:i+160]
 
         // round 11
-        "vmovdqa64 160(%1, %%rax), %%xmm18;" // Load M[10] into xmm18
+        "vmovdqu64 160(%1, %%rax), %%xmm18;" // Load M[10] into xmm18
         "vpxorq %%xmm10, %%xmm11, %%xmm26;"  // C[10] = hiae_vaes_avx512_SIMD_XOR(S[10], S[11])
         "vaesenc %%xmm18, %%xmm26, %%xmm26;" // C[10] = hiae_vaes_avx512_AESENC(M[10], C[10])
         "vaesenc %%xmm26, %%xmm7, %%xmm10;"  // S[26] = hiae_vaes_avx512_AESENC(C[10], S[7])
         "vpxorq %%xmm26, %%xmm3, %%xmm26;"   // C[10] = hiae_vaes_avx512_SIMD_XOR(C[10], S[3])
         "vpxorq %%xmm13, %%xmm18, %%xmm13;"  // S[13] = hiae_vaes_avx512_SIMD_XOR(S[13], M[10])
         "vpxorq %%xmm7, %%xmm18, %%xmm7;"    // S[7] = hiae_vaes_avx512_SIMD_XOR(S[7], M[10])
-        "vmovdqa64 %%xmm26, 160(%0, %%rax);" // Write back C[10] to ci[i+160:i+176]
+        "vmovdqu64 %%xmm26, 160(%0, %%rax);" // Write back C[10] to ci[i+160:i+176]
 
         // round 12
-        "vmovdqa64 176(%1, %%rax), %%xmm19;" // Load M[11] into xmm19
+        "vmovdqu64 176(%1, %%rax), %%xmm19;" // Load M[11] into xmm19
         "vpxorq %%xmm11, %%xmm12, %%xmm27;"  // C[11] = hiae_vaes_avx512_SIMD_XOR(S[11], S[12])
         "vaesenc %%xmm19, %%xmm27, %%xmm27;" // C[11] = hiae_vaes_avx512_AESENC(M[11], C[11])
         "vaesenc %%xmm27, %%xmm8, %%xmm11;"  // S[27] = hiae_vaes_avx512_AESENC(C[11], S[8])
         "vpxorq %%xmm27, %%xmm4, %%xmm27;"   // C[11] = hiae_vaes_avx512_SIMD_XOR(C[11], S[4])
         "vpxorq %%xmm14, %%xmm19, %%xmm14;"  // S[14] = hiae_vaes_avx512_SIMD_XOR(S[14], M[11])
         "vpxorq %%xmm8, %%xmm19, %%xmm8;"    // S[8] = hiae_vaes_avx512_SIMD_XOR(S[8], M[11])
-        "vmovdqa64 %%xmm27, 176(%0, %%rax);" // Write back C[11] to ci[i+176:i+192]
+        "vmovdqu64 %%xmm27, 176(%0, %%rax);" // Write back C[11] to ci[i+176:i+192]
 
         // round 13
-        "vmovdqa64 192(%1, %%rax), %%xmm20;" // Load M[12] into xmm20
+        "vmovdqu64 192(%1, %%rax), %%xmm20;" // Load M[12] into xmm20
         "vpxorq %%xmm12, %%xmm13, %%xmm28;"  // C[12] = hiae_vaes_avx512_SIMD_XOR(S[12], S[13])
         "vaesenc %%xmm20, %%xmm28, %%xmm28;" // C[12] = hiae_vaes_avx512_AESENC(M[12], C[12])
         "vaesenc %%xmm28, %%xmm9, %%xmm12;"  // S[28] = hiae_vaes_avx512_AESENC(C[12], S[9])
         "vpxorq %%xmm28, %%xmm5, %%xmm28;"   // C[12] = hiae_vaes_avx512_SIMD_XOR(C[12], S[5])
         "vpxorq %%xmm15, %%xmm20, %%xmm15;"  // S[15] = hiae_vaes_avx512_SIMD_XOR(S[15], M[12])
         "vpxorq %%xmm9, %%xmm20, %%xmm9;"    // S[9] = hiae_vaes_avx512_SIMD_XOR(S[9], M[12])
-        "vmovdqa64 %%xmm28, 192(%0, %%rax);" // Write back C[12] to ci[i+192:i+208]
+        "vmovdqu64 %%xmm28, 192(%0, %%rax);" // Write back C[12] to ci[i+192:i+208]
 
         // round 14
-        "vmovdqa64 208(%1, %%rax), %%xmm21;" // Load M[13] into xmm21
+        "vmovdqu64 208(%1, %%rax), %%xmm21;" // Load M[13] into xmm21
         "vpxorq %%xmm13, %%xmm14, %%xmm29;"  // C[13] = hiae_vaes_avx512_SIMD_XOR(S[13], S[14])
         "vaesenc %%xmm21, %%xmm29, %%xmm29;" // C[13] = hiae_vaes_avx512_AESENC(M[13], C[13])
         "vaesenc %%xmm29, %%xmm10, %%xmm13;" // S[29] = hiae_vaes_avx512_AESENC(C[13], S[10])
         "vpxorq %%xmm29, %%xmm6, %%xmm29;"   // C[13] = hiae_vaes_avx512_SIMD_XOR(C[13], S[6])
         "vpxorq %%xmm0, %%xmm21, %%xmm0;"    // S[0] = hiae_vaes_avx512_SIMD_XOR(S[0], M[13])
         "vpxorq %%xmm10, %%xmm21, %%xmm10;"  // S[10] = hiae_vaes_avx512_SIMD_XOR(S[10], M[13])
-        "vmovdqa64 %%xmm29, 208(%0, %%rax);" // Write back C[13] to ci[i+208:i+224]
+        "vmovdqu64 %%xmm29, 208(%0, %%rax);" // Write back C[13] to ci[i+208:i+224]
 
         // round 15
-        "vmovdqa64 224(%1, %%rax), %%xmm22;" // Load M[14] into xmm22
+        "vmovdqu64 224(%1, %%rax), %%xmm22;" // Load M[14] into xmm22
         "vpxorq %%xmm14, %%xmm15, %%xmm30;"  // C[14] = hiae_vaes_avx512_SIMD_XOR(S[14], S[15])
         "vaesenc %%xmm22, %%xmm30, %%xmm30;" // C[14] = hiae_vaes_avx512_AESENC(M[14], C[14])
         "vaesenc %%xmm30, %%xmm11, %%xmm14;" // S[30] = hiae_vaes_avx512_AESENC(C[14], S[11])
         "vpxorq %%xmm30, %%xmm7, %%xmm30;"   // C[14] = hiae_vaes_avx512_SIMD_XOR(C[14], S[7])
         "vpxorq %%xmm1, %%xmm22, %%xmm1;"    // S[1] = hiae_vaes_avx512_SIMD_XOR(S[1], M[14])
         "vpxorq %%xmm11, %%xmm22, %%xmm11;"  // S[11] = hiae_vaes_avx512_SIMD_XOR(S[11], M[14])
-        "vmovdqa64 %%xmm30, 224(%0, %%rax);" // Write back C[14] to ci[i+224:i+240]
+        "vmovdqu64 %%xmm30, 224(%0, %%rax);" // Write back C[14] to ci[i+224:i+240]
 
         // round 16
-        "vmovdqa64 240(%1, %%rax), %%xmm23;" // Load M[15] into xmm23
+        "vmovdqu64 240(%1, %%rax), %%xmm23;" // Load M[15] into xmm23
         "vpxorq %%xmm15, %%xmm0, %%xmm31;"   // C[15] = hiae_vaes_avx512_SIMD_XOR(S[15], S[0])
         "vaesenc %%xmm23, %%xmm31, %%xmm31;" // C[15] = hiae_vaes_avx512_AESENC(M[15], C[15])
         "vaesenc %%xmm31, %%xmm12, %%xmm15;" // S[31] = hiae_vaes_avx512_AESENC(C[15], S[12])
         "vpxorq %%xmm31, %%xmm8, %%xmm31;"   // C[15] = hiae_vaes_avx512_SIMD_XOR(C[15], S[8])
         "vpxorq %%xmm2, %%xmm23, %%xmm2;"    // S[2] = hiae_vaes_avx512_SIMD_XOR(S[2], M[15])
         "vpxorq %%xmm12, %%xmm23, %%xmm12;"  // S[12] = hiae_vaes_avx512_SIMD_XOR(S[12], M[15])
-        "vmovdqa64 %%xmm31, 240(%0, %%rax);" // Write back C[15] to ci[i+240:i+256]
+        "vmovdqu64 %%xmm31, 240(%0, %%rax);" // Write back C[15] to ci[i+240:i+256]
 
         "addq $256, %%rax;" // i += 256
         "jmp 1b;"           // Loop back
@@ -3299,6 +3852,16 @@ static void HiAE_dec_partial_noupdate_vaes(HiAE_state_t  *state_opaque,
     memcpy(mi, buf, size);
 }
 
+static int HiAE_verify_vaes(HiAE_state_t *state, uint64_t ad_len, uint64_t msg_len,
+                            const uint8_t *tag)
+{
+    uint8_t computed_tag[HIAE_MACBYTES];
+
+    HiAE_finalize_vaes(state, ad_len, msg_len, computed_tag);
+
+    return hiae_constant_time_compare(computed_tag, tag, HIAE_MACBYTES);
+}
+
 static int HiAE_encrypt_vaes(const uint8_t *key,
                              const uint8_t *nonce,
                              const uint8_t *msg,
@@ -3351,6 +3914,7 @@ const HiAE_impl_t hiae_vaes_avx512_impl = { .name                 = "VAES+AVX512
                                             .init                 = HiAE_init_vaes,
                                             .absorb               = HiAE_absorb_vaes,
                                             .finalize             = HiAE_finalize_vaes,
+                                            .verify               = HiAE_verify_vaes,
                                             .enc                  = HiAE_enc_vaes,
                                             .dec                  = HiAE_dec_vaes,
                                             .enc_partial_noupdate = HiAE_enc_partial_noupdate_vaes,
@@ -3369,6 +3933,7 @@ const HiAE_impl_t hiae_vaes_avx512_impl = { .name                 = NULL,
                                             .init                 = NULL,
                                             .absorb               = NULL,
                                             .finalize             = NULL,
+                                            .verify               = NULL,
                                             .enc                  = NULL,
                                             .dec                  = NULL,
                                             .enc_partial_noupdate = NULL,
@@ -3909,6 +4474,16 @@ static void HiAE_dec_arm(HiAE_state_t *state_opaque, uint8_t *mi, const uint8_t 
     memcpy(state_opaque->opaque, state, sizeof(state));
 }
 
+static int HiAE_verify_arm(HiAE_state_t *state, uint64_t ad_len, uint64_t msg_len,
+                           const uint8_t *tag)
+{
+    uint8_t computed_tag[HIAE_MACBYTES];
+
+    HiAE_finalize_arm(state, ad_len, msg_len, computed_tag);
+
+    return hiae_constant_time_compare(computed_tag, tag, HIAE_MACBYTES);
+}
+
 static int HiAE_encrypt_arm(const uint8_t *key,
                             const uint8_t *nonce,
                             const uint8_t *msg,
@@ -3961,6 +4536,7 @@ const HiAE_impl_t hiae_arm_impl = { .name                 = "ARM NEON",
                                     .init                 = HiAE_init_arm,
                                     .absorb               = HiAE_absorb_arm,
                                     .finalize             = HiAE_finalize_arm,
+                                    .verify               = HiAE_verify_arm,
                                     .enc                  = HiAE_enc_arm,
                                     .dec                  = HiAE_dec_arm,
                                     .enc_partial_noupdate = HiAE_enc_partial_noupdate_arm,
@@ -3979,6 +4555,7 @@ const HiAE_impl_t hiae_arm_impl = { .name                 = NULL,
                                     .init                 = NULL,
                                     .absorb               = NULL,
                                     .finalize             = NULL,
+                                    .verify               = NULL,
                                     .enc                  = NULL,
                                     .dec                  = NULL,
                                     .enc_partial_noupdate = NULL,
@@ -4012,7 +4589,11 @@ const HiAE_impl_t hiae_arm_impl = { .name                 = NULL,
 #ifdef __clang__
 #pragma clang attribute push(__attribute__((target("neon,crypto,aes,sha3"))), apply_to = function)
 #elif defined(__GNUC__)
+#if __GNUC__ < 14
+#pragma GCC target("arch=armv8.2-a+simd+crypto+sha3")
+#else
 #pragma GCC target("+simd+crypto+sha3")
+#endif
 #endif
 
 // Prefetch macros - tuned for ARM64
@@ -4539,6 +5120,16 @@ static void HiAE_dec_partial_noupdate_arm_sha3(HiAE_state_t  *state_opaque,
     memcpy(mi, buf, size);
 }
 
+static int HiAE_verify_arm_sha3(HiAE_state_t *state, uint64_t ad_len, uint64_t msg_len,
+                                const uint8_t *tag)
+{
+    uint8_t computed_tag[HIAE_MACBYTES];
+
+    HiAE_finalize_arm_sha3(state, ad_len, msg_len, computed_tag);
+
+    return hiae_constant_time_compare(computed_tag, tag, HIAE_MACBYTES);
+}
+
 static int HiAE_encrypt_arm_sha3(const uint8_t *key,
                                  const uint8_t *nonce,
                                  const uint8_t *msg,
@@ -4591,6 +5182,7 @@ const HiAE_impl_t hiae_arm_sha3_impl = { .name                 = "ARM SHA3",
                                          .init                 = HiAE_init_arm_sha3,
                                          .absorb               = HiAE_absorb_arm_sha3,
                                          .finalize             = HiAE_finalize_arm_sha3,
+                                         .verify               = HiAE_verify_arm_sha3,
                                          .enc                  = HiAE_enc_arm_sha3,
                                          .dec                  = HiAE_dec_arm_sha3,
                                          .enc_partial_noupdate = HiAE_enc_partial_noupdate_arm_sha3,
@@ -4609,6 +5201,7 @@ const HiAE_impl_t hiae_arm_sha3_impl = { .name                 = NULL,
                                          .init                 = NULL,
                                          .absorb               = NULL,
                                          .finalize             = NULL,
+                                         .verify               = NULL,
                                          .enc                  = NULL,
                                          .dec                  = NULL,
                                          .enc_partial_noupdate = NULL,
@@ -4629,71 +5222,6 @@ const HiAE_impl_t hiae_arm_sha3_impl = { .name                 = NULL,
  * This file implements runtime CPU feature detection and dispatches
  * to the appropriate optimized implementation based on available features.
  */
-
-#include <assert.h>
-#include <stddef.h>
-#include <stdint.h>
-
-#ifdef __linux__
-#define HAVE_SYS_AUXV_H
-#define HAVE_GETAUXVAL
-#endif
-#ifdef __ANDROID_API__
-#if __ANDROID_API__ < 18
-#undef HAVE_GETAUXVAL
-#endif
-#define HAVE_ANDROID_GETCPUFEATURES
-#endif
-#if defined(__i386__) || defined(_M_IX86) || defined(__x86_64__) || defined(_M_AMD64)
-#define HAVE_CPUID
-#define NATIVE_LITTLE_ENDIAN
-#if defined(__clang__) || defined(__GNUC__)
-#define HAVE_AVX_ASM
-#endif
-#define HAVE_AVXINTRIN_H
-#define HAVE_AVX2INTRIN_H
-#define HAVE_AVX512FINTRIN_H
-#define HAVE_TMMINTRIN_H
-#define HAVE_WMMINTRIN_H
-#define HAVE_VAESINTRIN_H
-#ifdef __GNUC__
-#if !__has_include(<vaesintrin.h>)
-#undef HAVE_VAESINTRIN_H
-#endif
-#endif
-/* target pragmas don't define these flags on clang-cl (an alternative clang driver for Windows) */
-#if defined(__clang__) && defined(_MSC_BUILD) && defined(_MSC_VER) && \
-    (defined(_M_IX86) || defined(_M_AMD64)) && !defined(__SSE3__)
-#undef __SSE3__
-#undef __SSSE3__
-#undef __SSE4_1__
-#undef __AVX__
-#undef __AVX2__
-#undef __AVX512F__
-#undef __AES__
-#undef __VAES__
-
-#define __SSE3__ 1
-#define __SSSE3__ 1
-#define __SSE4_1__ 1
-#define __AVX__ 1
-#define __AVX2__ 1
-#define __AVX512F__ 1
-#define __AES__ 1
-#define __VAES__ 1
-#endif
-
-#endif
-
-#ifdef DISABLE_AVX2
-#undef HAVE_AVXINTRIN_H
-#undef HAVE_AVX2INTRIN_H
-#undef HAVE_AVX512FINTRIN_H
-#undef HAVE_VAESINTRIN_H
-#endif
-#ifdef DISABLE_AVX512
-#undef HAVE_AVX512FINTRIN_H
-#endif
 
 #ifdef HAVE_ANDROID_GETCPUFEATURES
 #include <cpu-features.h>
@@ -4935,7 +5463,7 @@ static int _runtime_arm_cpu_features(CPUFeatures *const cpu_features)
         return 0;
     }
 
-#if __ARM_FEATURE_CRYPTO || __ARM_FEATURE_AES
+#if defined(HIAE_HAS_HW_AES)
     cpu_features->has_neon_aes = 1;
 #elif defined(_M_ARM64)
     // Assuming all CPUs supported by Arm Windows have the crypto extensions.
@@ -4955,7 +5483,7 @@ static int _runtime_arm_cpu_features(CPUFeatures *const cpu_features)
         return 0;
     }
 
-#if __ARM_FEATURE_SHA3
+#if defined(HIAE_HAS_HW_SHA3)
     cpu_features->has_neon_sha3 = 1;
 #elif defined(__APPLE__) && defined(CPU_TYPE_ARM64) && defined(CPU_SUBTYPE_ARM64E)
     cpu_features->has_neon_sha3 = _have_feature("hw.optional.arm.FEAT_SHA3");
@@ -4990,8 +5518,7 @@ static int hiae_runtime_get_cpu_features(void)
 }
 
 // External declarations for implementation tables
-#if !((defined(__AES__) && defined(__VAES__) && defined(__AVX512F__)) || \
-      defined(__ARM_FEATURE_CRYPTO))
+#ifndef HIAE_HAS_HW_AES
 extern const HiAE_impl_t hiae_software_impl;
 #endif
 #if defined(__x86_64__) || defined(_M_X64)
@@ -5010,8 +5537,7 @@ static HiAE_impl_t *hiae_get_impl_by_name(const char *name)
         return NULL;
     }
 
-#if !((defined(__AES__) && defined(__VAES__) && defined(__AVX512F__)) || \
-      defined(__ARM_FEATURE_CRYPTO))
+#ifndef HIAE_HAS_HW_AES
     if (strcmp(name, "Software") == 0) {
         return (HiAE_impl_t *) &hiae_software_impl;
     }
@@ -5064,10 +5590,14 @@ static void hiae_init_dispatch(void)
         hiae_runtime_get_cpu_features();
     }
 
-#if !((defined(__AES__) && defined(__VAES__) && defined(__AVX512F__)) || \
-      defined(__ARM_FEATURE_CRYPTO))
-    // Default to software implementation when hardware AES+VAES+AVX512 is not available
+    // Start from the implementation the compilation baseline guarantees, then
+    // upgrade it below if the CPU actually supports something faster.
+#ifndef HIAE_HAS_HW_AES
     hiae_impl = (HiAE_impl_t *) &hiae_software_impl;
+#elif defined(__x86_64__) || defined(_M_X64)
+    hiae_impl = (HiAE_impl_t *) &hiae_aesni_impl;
+#elif defined(__aarch64__) || defined(_M_ARM64) || defined(__arm64__)
+    hiae_impl = (HiAE_impl_t *) &hiae_arm_impl;
 #endif
 
     // Select best available implementation based on CPU features
@@ -5082,23 +5612,6 @@ static void hiae_init_dispatch(void)
         hiae_impl = (HiAE_impl_t *) &hiae_arm_sha3_impl;
     } else if (_cpu_features.has_neon_aes && hiae_arm_impl.init != NULL) {
         hiae_impl = (HiAE_impl_t *) &hiae_arm_impl;
-    }
-#endif
-
-#if (defined(__AES__) && defined(__VAES__) && defined(__AVX512F__)) || defined(__ARM_FEATURE_CRYPTO)
-    // When hardware AES+VAES+AVX512 is available, ensure we have a valid implementation
-    if (hiae_impl == NULL) {
-#if defined(__x86_64__) || defined(_M_X64)
-        // Fallback to AES-NI on x86-64 if available
-        if (hiae_aesni_impl.init != NULL) {
-            hiae_impl = (HiAE_impl_t *) &hiae_aesni_impl;
-        }
-#elif defined(__aarch64__) || defined(_M_ARM64) || defined(__arm64__)
-        // Fallback to ARM NEON on ARM64 if available
-        if (hiae_arm_impl.init != NULL) {
-            hiae_impl = (HiAE_impl_t *) &hiae_arm_impl;
-        }
-#endif
     }
 #endif
 
@@ -5151,6 +5664,12 @@ void HiAE_finalize(HiAE_state_t *state, uint64_t ad_len, uint64_t msg_len, uint8
 {
     hiae_init_dispatch();
     hiae_impl->finalize(state, ad_len, msg_len, tag);
+}
+
+int hiae_verify(HiAE_state_t *state, uint64_t ad_len, uint64_t msg_len, const uint8_t *tag)
+{
+    hiae_init_dispatch();
+    return hiae_impl->verify(state, ad_len, msg_len, tag);
 }
 
 void HiAE_enc(HiAE_state_t *state, uint8_t *ci, const uint8_t *mi, size_t size)
@@ -5249,8 +5768,6 @@ int HiAE_force_implementation(const char *impl_name)
  * HiAE_stream.c - Streaming API implementation
  * =====================================================
  */
-#include <assert.h>
-#include <string.h>
 
 void HiAE_stream_init(HiAE_stream_state_t *stream, const uint8_t *key, const uint8_t *nonce)
 {
@@ -5463,11 +5980,9 @@ int HiAE_stream_verify(HiAE_stream_state_t *stream, const uint8_t *expected_tag)
         stream->offset = 0;
     }
 
-    uint8_t computed_tag[HIAE_MACBYTES];
-    HiAE_finalize(&stream->state, stream->ad_len, stream->msg_len, computed_tag);
     stream->phase = HIAE_STREAM_FINAL;
 
-    return hiae_constant_time_compare(expected_tag, computed_tag, HIAE_MACBYTES);
+    return hiae_verify(&stream->state, stream->ad_len, stream->msg_len, expected_tag);
 }
 
 #ifdef __cplusplus
