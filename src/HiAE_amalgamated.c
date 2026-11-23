@@ -783,6 +783,16 @@ static inline int hiae_strcmp(const char *a, const char *b)
 #undef HAVE_AVX512FINTRIN_H
 #endif
 
+/* GCC copies a zeroed register before every AESE, which is slow. A fresh zero avoids the copy. */
+#if defined(__aarch64__) && defined(__GNUC__) && !defined(__clang__)
+#define HIAE_NEON_ZERO()                                    \
+    __extension__({                                         \
+        uint8x16_t z_;                                      \
+        __asm__ __volatile__("movi %0.16b, #0" : "=w"(z_)); \
+        z_;                                                 \
+    })
+#endif
+
 /* The C0 and C1 constants from the specification, which the parallel variants use in every lane */
 #define HIAE_C0_BYTES \
     0x32, 0x43, 0xf6, 0xa8, 0x88, 0x5a, 0x30, 0x8d, 0x31, 0x31, 0x98, 0xa2, 0xe0, 0x37, 0x07, 0x34
@@ -969,12 +979,6 @@ static inline void store32_le(uint8_t dst[4], uint32_t w)
     w >>= 8;
     dst[3] = (uint8_t) w;
 #endif
-}
-
-#define ROTL32(X, B) rotl32((X), (B))
-static inline uint32_t rotl32(const uint32_t x, const int b)
-{
-    return (x << b) | (x >> (32 - b));
 }
 
 #if defined(__wasm_simd128__) && !defined(SOFTAES_NO_SIMD)
@@ -1360,6 +1364,12 @@ static SoftAesBlock _encrypt(const uint8_t ix0[4], const uint8_t ix1[4], const u
 }
 
 #else
+
+#define ROTL32(X, B) rotl32((X), (B))
+static inline uint32_t rotl32(const uint32_t x, const int b)
+{
+    return (x << b) | (x >> (32 - b));
+}
 
 uint32_t _aes_lut[256] __attribute__((visibility("hidden"))) = {
     0xa56363c6, 0x847c7cf8, 0x997777ee, 0x8d7b7bf6, 0x0df2f2ff, 0xbd6b6bd6, 0xb16f6fde, 0x54c5c591,
@@ -3962,7 +3972,8 @@ const HiAE_impl_t hiae_vaes_avx512_impl = { .name                 = NULL,
 #include <arm_neon.h>
 
 #ifdef __clang__
-#pragma clang attribute push(__attribute__((target("neon,crypto,aes"))), apply_to = function)
+#pragma clang attribute push(__attribute__((target("neon,crypto,aes,fuse-aes"))), \
+                             apply_to = function)
 #elif defined(__GNUC__)
 #pragma GCC target("+simd+crypto")
 #endif
@@ -3990,7 +4001,11 @@ typedef uint8x16_t hiae_arm_DATA128b;
 #define hiae_arm_SIMD_AND(a, b) vandq_u8(a, b)
 #define hiae_arm_SIMD_ZERO_128() vmovq_n_u8(0)
 #define hiae_arm_XAESL(x, y) vaesmcq_u8(vaeseq_u8(x, y))
+#ifdef HIAE_NEON_ZERO
+#define hiae_arm_AESL(x) hiae_arm_XAESL(HIAE_NEON_ZERO(), x)
+#else
 #define hiae_arm_AESL(x) hiae_arm_XAESL(x, hiae_arm_SIMD_ZERO_128())
+#endif
 
 static inline void hiae_arm_update_state_offset(hiae_arm_DATA128b *state, hiae_arm_DATA128b M,
                                                 int offset)
@@ -4033,8 +4048,9 @@ static inline hiae_arm_DATA128b hiae_arm_dec_offset(hiae_arm_DATA128b *state,
 {
     tmp[offset] = hiae_arm_XAESL(state[(P_0 + offset) % STATE], state[(P_1 + offset) % STATE]);
     hiae_arm_DATA128b M = hiae_arm_SIMD_XOR(state[(P_7 + offset) % STATE], C);
-    state[(0 + offset) % STATE] =
-        hiae_arm_SIMD_XOR(M, hiae_arm_AESL(state[(P_4 + offset) % STATE]));
+    // Not hiae_arm_AESL(): with GCC, a fresh zero makes this loop slower on Neoverse N1.
+    state[(0 + offset) % STATE] = hiae_arm_SIMD_XOR(
+        M, hiae_arm_XAESL(state[(P_4 + offset) % STATE], hiae_arm_SIMD_ZERO_128()));
     M                             = hiae_arm_SIMD_XOR(M, tmp[offset]);
     state[(I_1 + offset) % STATE] = hiae_arm_SIMD_XOR(state[(I_1 + offset) % STATE], M);
     state[(I_2 + offset) % STATE] = hiae_arm_SIMD_XOR(state[(I_2 + offset) % STATE], M);
@@ -4587,7 +4603,8 @@ const HiAE_impl_t hiae_arm_impl = { .name                 = NULL,
 #include <arm_neon.h>
 
 #ifdef __clang__
-#pragma clang attribute push(__attribute__((target("neon,crypto,aes,sha3"))), apply_to = function)
+#pragma clang attribute push(__attribute__((target("neon,crypto,aes,sha3,fuse-aes"))), \
+                             apply_to = function)
 #elif defined(__GNUC__)
 #if __GNUC__ < 14
 #pragma GCC target("arch=armv8.2-a+simd+crypto+sha3")
@@ -4620,7 +4637,11 @@ typedef uint8x16_t hiae_arm_sha3_DATA128b;
 #define hiae_arm_sha3_SIMD_XOR3(a, b, c) veor3q_u8(a, b, c)
 #define hiae_arm_sha3_SIMD_ZERO_128() vmovq_n_u8(0)
 #define hiae_arm_sha3_XAESL(x, y) vaesmcq_u8(vaeseq_u8(x, y))
+#ifdef HIAE_NEON_ZERO
+#define hiae_arm_sha3_AESL(x) hiae_arm_sha3_XAESL(HIAE_NEON_ZERO(), x)
+#else
 #define hiae_arm_sha3_AESL(x) hiae_arm_sha3_XAESL(x, hiae_arm_sha3_SIMD_ZERO_128())
+#endif
 
 static inline void hiae_arm_sha3_update_state_offset(hiae_arm_sha3_DATA128b *state,
                                                      hiae_arm_sha3_DATA128b *tmp,
