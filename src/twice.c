@@ -1372,7 +1372,7 @@ int main(int argc, char *argv[])
         perror("mtu");
     }
 #ifdef __OpenBSD__
-    pledge("stdio proc exec dns inet", NULL);
+    pledge("stdio proc exec dns inet pf error", NULL);
 #endif
     context->firewall_rules_set = -1;
     if (context->server_ip_or_name != NULL &&
@@ -1399,6 +1399,7 @@ int main(int argc, char *argv[])
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
     if (doit(context) != 0) {
+        firewall_rules(context, 0, 0);
         cleanup_context(context);
         free(context);
         return -1;
